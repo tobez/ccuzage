@@ -47,3 +47,7 @@ test "module compiles" {
     // Verify this module and its dependencies compile successfully.
     _ = version;
 }
+
+test {
+    _ = @import("date.zig");
+}
