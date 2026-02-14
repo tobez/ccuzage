@@ -177,7 +177,9 @@ pub fn loadAllEntries(allocator: std.mem.Allocator) ![]types.UsageEntry {
         const ps = extractProjectAndSession(file_path) orelse continue;
 
         // Read the file
-        const contents = std.fs.cwd().readFileAlloc(allocator, file_path, 256 * 1024 * 1024) catch continue;
+        const file = std.fs.openFileAbsolute(file_path, .{}) catch continue;
+        defer file.close();
+        const contents = file.readToEndAlloc(allocator, 256 * 1024 * 1024) catch continue;
         defer allocator.free(contents);
 
         // Split into lines
