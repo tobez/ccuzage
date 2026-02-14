@@ -340,6 +340,48 @@ pub fn aggregateSession(
     return result;
 }
 
+pub fn calculateTotals(items: []const types.AggregatedUsage) types.Totals {
+    var totals = types.Totals{
+        .input_tokens = 0,
+        .output_tokens = 0,
+        .cache_creation_tokens = 0,
+        .cache_read_tokens = 0,
+        .total_tokens = 0,
+        .total_cost = 0,
+    };
+    for (items) |item| {
+        totals.input_tokens += item.input_tokens;
+        totals.output_tokens += item.output_tokens;
+        totals.cache_creation_tokens += item.cache_creation_tokens;
+        totals.cache_read_tokens += item.cache_read_tokens;
+        totals.total_cost += item.total_cost;
+    }
+    totals.total_tokens = totals.input_tokens + totals.output_tokens +
+        totals.cache_creation_tokens + totals.cache_read_tokens;
+    return totals;
+}
+
+pub fn calculateSessionTotals(items: []const types.SessionUsage) types.Totals {
+    var totals = types.Totals{
+        .input_tokens = 0,
+        .output_tokens = 0,
+        .cache_creation_tokens = 0,
+        .cache_read_tokens = 0,
+        .total_tokens = 0,
+        .total_cost = 0,
+    };
+    for (items) |item| {
+        totals.input_tokens += item.input_tokens;
+        totals.output_tokens += item.output_tokens;
+        totals.cache_creation_tokens += item.cache_creation_tokens;
+        totals.cache_read_tokens += item.cache_read_tokens;
+        totals.total_cost += item.total_cost;
+    }
+    totals.total_tokens = totals.input_tokens + totals.output_tokens +
+        totals.cache_creation_tokens + totals.cache_read_tokens;
+    return totals;
+}
+
 // =============================================================================
 // Test helpers
 // =============================================================================
@@ -676,6 +718,89 @@ test "aggregateSession - multiple sessions grouped correctly" {
     }
     try std.testing.expect(found_s1);
     try std.testing.expect(found_s2);
+}
+
+test "calculateTotals - sums two AggregatedUsage items" {
+    const items = [_]types.AggregatedUsage{
+        .{
+            .period = "2025-01-15",
+            .input_tokens = 100,
+            .output_tokens = 50,
+            .cache_creation_tokens = 10,
+            .cache_read_tokens = 20,
+            .total_cost = 1.5,
+            .models_used = &.{},
+            .model_breakdowns = &.{},
+            .project = null,
+        },
+        .{
+            .period = "2025-01-16",
+            .input_tokens = 200,
+            .output_tokens = 100,
+            .cache_creation_tokens = 30,
+            .cache_read_tokens = 40,
+            .total_cost = 2.5,
+            .models_used = &.{},
+            .model_breakdowns = &.{},
+            .project = null,
+        },
+    };
+
+    const totals = calculateTotals(&items);
+    try std.testing.expectEqual(@as(u64, 300), totals.input_tokens);
+    try std.testing.expectEqual(@as(u64, 150), totals.output_tokens);
+    try std.testing.expectEqual(@as(u64, 40), totals.cache_creation_tokens);
+    try std.testing.expectEqual(@as(u64, 60), totals.cache_read_tokens);
+    try std.testing.expectEqual(@as(u64, 550), totals.total_tokens);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.0), totals.total_cost, 0.0001);
+}
+
+test "calculateTotals - empty slice returns all zeros" {
+    const items = [_]types.AggregatedUsage{};
+    const totals = calculateTotals(&items);
+    try std.testing.expectEqual(@as(u64, 0), totals.input_tokens);
+    try std.testing.expectEqual(@as(u64, 0), totals.output_tokens);
+    try std.testing.expectEqual(@as(u64, 0), totals.cache_creation_tokens);
+    try std.testing.expectEqual(@as(u64, 0), totals.cache_read_tokens);
+    try std.testing.expectEqual(@as(u64, 0), totals.total_tokens);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), totals.total_cost, 0.0001);
+}
+
+test "calculateSessionTotals - sums two SessionUsage items" {
+    const items = [_]types.SessionUsage{
+        .{
+            .session_id = "sess-1",
+            .project_path = "/proj",
+            .input_tokens = 500,
+            .output_tokens = 200,
+            .cache_creation_tokens = 50,
+            .cache_read_tokens = 100,
+            .total_cost = 3.0,
+            .last_activity = "2025-01-15",
+            .models_used = &.{},
+            .model_breakdowns = &.{},
+        },
+        .{
+            .session_id = "sess-2",
+            .project_path = "/proj",
+            .input_tokens = 300,
+            .output_tokens = 150,
+            .cache_creation_tokens = 25,
+            .cache_read_tokens = 75,
+            .total_cost = 2.0,
+            .last_activity = "2025-01-16",
+            .models_used = &.{},
+            .model_breakdowns = &.{},
+        },
+    };
+
+    const totals = calculateSessionTotals(&items);
+    try std.testing.expectEqual(@as(u64, 800), totals.input_tokens);
+    try std.testing.expectEqual(@as(u64, 350), totals.output_tokens);
+    try std.testing.expectEqual(@as(u64, 75), totals.cache_creation_tokens);
+    try std.testing.expectEqual(@as(u64, 175), totals.cache_read_tokens);
+    try std.testing.expectEqual(@as(u64, 1400), totals.total_tokens);
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0), totals.total_cost, 0.0001);
 }
 
 test "aggregateSession - last activity reflects latest timestamp" {
