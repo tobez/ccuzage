@@ -340,6 +340,28 @@ pub fn aggregateSession(
     return result;
 }
 
+pub fn sortAggregated(items: []types.AggregatedUsage, order: types.SortOrder) void {
+    std.mem.sort(types.AggregatedUsage, items, order, struct {
+        fn lessThan(ord: types.SortOrder, a: types.AggregatedUsage, b: types.AggregatedUsage) bool {
+            return switch (ord) {
+                .asc => std.mem.order(u8, a.period, b.period) == .lt,
+                .desc => std.mem.order(u8, a.period, b.period) == .gt,
+            };
+        }
+    }.lessThan);
+}
+
+pub fn sortSessions(items: []types.SessionUsage, order: types.SortOrder) void {
+    std.mem.sort(types.SessionUsage, items, order, struct {
+        fn lessThan(ord: types.SortOrder, a: types.SessionUsage, b: types.SessionUsage) bool {
+            return switch (ord) {
+                .asc => std.mem.order(u8, a.last_activity, b.last_activity) == .lt,
+                .desc => std.mem.order(u8, a.last_activity, b.last_activity) == .gt,
+            };
+        }
+    }.lessThan);
+}
+
 pub fn filterByDateRange(
     allocator: std.mem.Allocator,
     entries: []const types.UsageEntry,
@@ -891,6 +913,43 @@ test "filterByDateRange - empty entries returns empty result" {
     defer std.testing.allocator.free(result);
 
     try std.testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "sortAggregated - desc gives reverse chronological order" {
+    var items = [_]types.AggregatedUsage{
+        .{ .period = "2025-01-10", .input_tokens = 0, .output_tokens = 0, .cache_creation_tokens = 0, .cache_read_tokens = 0, .total_cost = 0, .models_used = &.{}, .model_breakdowns = &.{}, .project = null },
+        .{ .period = "2025-01-20", .input_tokens = 0, .output_tokens = 0, .cache_creation_tokens = 0, .cache_read_tokens = 0, .total_cost = 0, .models_used = &.{}, .model_breakdowns = &.{}, .project = null },
+        .{ .period = "2025-01-15", .input_tokens = 0, .output_tokens = 0, .cache_creation_tokens = 0, .cache_read_tokens = 0, .total_cost = 0, .models_used = &.{}, .model_breakdowns = &.{}, .project = null },
+    };
+
+    sortAggregated(&items, .desc);
+    try std.testing.expectEqualStrings("2025-01-20", items[0].period);
+    try std.testing.expectEqualStrings("2025-01-15", items[1].period);
+    try std.testing.expectEqualStrings("2025-01-10", items[2].period);
+}
+
+test "sortAggregated - asc gives chronological order" {
+    var items = [_]types.AggregatedUsage{
+        .{ .period = "2025-01-20", .input_tokens = 0, .output_tokens = 0, .cache_creation_tokens = 0, .cache_read_tokens = 0, .total_cost = 0, .models_used = &.{}, .model_breakdowns = &.{}, .project = null },
+        .{ .period = "2025-01-10", .input_tokens = 0, .output_tokens = 0, .cache_creation_tokens = 0, .cache_read_tokens = 0, .total_cost = 0, .models_used = &.{}, .model_breakdowns = &.{}, .project = null },
+        .{ .period = "2025-01-15", .input_tokens = 0, .output_tokens = 0, .cache_creation_tokens = 0, .cache_read_tokens = 0, .total_cost = 0, .models_used = &.{}, .model_breakdowns = &.{}, .project = null },
+    };
+
+    sortAggregated(&items, .asc);
+    try std.testing.expectEqualStrings("2025-01-10", items[0].period);
+    try std.testing.expectEqualStrings("2025-01-15", items[1].period);
+    try std.testing.expectEqualStrings("2025-01-20", items[2].period);
+}
+
+test "sortSessions - desc sorts by last_activity reverse chronological" {
+    var items = [_]types.SessionUsage{
+        .{ .session_id = "s1", .project_path = "/p", .input_tokens = 0, .output_tokens = 0, .cache_creation_tokens = 0, .cache_read_tokens = 0, .total_cost = 0, .last_activity = "2025-01-10", .models_used = &.{}, .model_breakdowns = &.{} },
+        .{ .session_id = "s2", .project_path = "/p", .input_tokens = 0, .output_tokens = 0, .cache_creation_tokens = 0, .cache_read_tokens = 0, .total_cost = 0, .last_activity = "2025-01-20", .models_used = &.{}, .model_breakdowns = &.{} },
+    };
+
+    sortSessions(&items, .desc);
+    try std.testing.expectEqualStrings("2025-01-20", items[0].last_activity);
+    try std.testing.expectEqualStrings("2025-01-10", items[1].last_activity);
 }
 
 test "aggregateSession - last activity reflects latest timestamp" {
