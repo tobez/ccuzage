@@ -52,4 +52,5 @@ test {
     _ = @import("date.zig");
     _ = @import("types.zig");
     _ = @import("parser.zig");
+    _ = @import("loader.zig");
 }
