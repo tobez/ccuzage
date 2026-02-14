@@ -340,6 +340,34 @@ pub fn aggregateSession(
     return result;
 }
 
+pub fn filterByDateRange(
+    allocator: std.mem.Allocator,
+    entries: []const types.UsageEntry,
+    since: ?[]const u8,
+    until: ?[]const u8,
+    tz_offset_minutes: i32,
+) ![]const types.UsageEntry {
+    var list: std.ArrayList(types.UsageEntry) = .{};
+    errdefer list.deinit(allocator);
+
+    for (entries) |entry| {
+        const daily_buf = date.formatDaily(entry.timestamp, tz_offset_minutes);
+        const filter_date = date.dailyToFilterDate(&daily_buf);
+        const entry_date: []const u8 = &filter_date;
+
+        if (since) |s| {
+            if (std.mem.order(u8, entry_date, s) == .lt) continue;
+        }
+        if (until) |u| {
+            if (std.mem.order(u8, entry_date, u) == .gt) continue;
+        }
+
+        try list.append(allocator, entry);
+    }
+
+    return try list.toOwnedSlice(allocator);
+}
+
 pub fn calculateTotals(items: []const types.AggregatedUsage) types.Totals {
     var totals = types.Totals{
         .input_tokens = 0,
@@ -801,6 +829,68 @@ test "calculateSessionTotals - sums two SessionUsage items" {
     try std.testing.expectEqual(@as(u64, 175), totals.cache_read_tokens);
     try std.testing.expectEqual(@as(u64, 1400), totals.total_tokens);
     try std.testing.expectApproxEqAbs(@as(f64, 5.0), totals.total_cost, 0.0001);
+}
+
+test "filterByDateRange - since and until filters correctly" {
+    // Entries on Jan 10, Jan 15, Jan 20 — filter since=20250112, until=20250118 → only Jan 15
+    const entries = [_]types.UsageEntry{
+        makeEntry("s1", "proj", 1736505000000, "model-a", 100, 10, 0, 0, 0.01), // 2025-01-10T10:30:00Z
+        makeEntry("s1", "proj", 1736937000000, "model-a", 200, 20, 0, 0, 0.02), // 2025-01-15T10:30:00Z
+        makeEntry("s1", "proj", 1737369000000, "model-a", 300, 30, 0, 0, 0.03), // 2025-01-20T10:30:00Z
+    };
+
+    const result = try filterByDateRange(std.testing.allocator, &entries, "20250112", "20250118", 0);
+    defer std.testing.allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+    try std.testing.expectEqual(@as(u64, 200), result[0].input_tokens);
+}
+
+test "filterByDateRange - since only, no until" {
+    const entries = [_]types.UsageEntry{
+        makeEntry("s1", "proj", 1736505000000, "model-a", 100, 10, 0, 0, 0.01), // 2025-01-10
+        makeEntry("s1", "proj", 1736937000000, "model-a", 200, 20, 0, 0, 0.02), // 2025-01-15
+        makeEntry("s1", "proj", 1737369000000, "model-a", 300, 30, 0, 0, 0.03), // 2025-01-20
+    };
+
+    const result = try filterByDateRange(std.testing.allocator, &entries, "20250115", null, 0);
+    defer std.testing.allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+}
+
+test "filterByDateRange - until only, no since" {
+    const entries = [_]types.UsageEntry{
+        makeEntry("s1", "proj", 1736505000000, "model-a", 100, 10, 0, 0, 0.01), // 2025-01-10
+        makeEntry("s1", "proj", 1736937000000, "model-a", 200, 20, 0, 0, 0.02), // 2025-01-15
+        makeEntry("s1", "proj", 1737369000000, "model-a", 300, 30, 0, 0, 0.03), // 2025-01-20
+    };
+
+    const result = try filterByDateRange(std.testing.allocator, &entries, null, "20250115", 0);
+    defer std.testing.allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+}
+
+test "filterByDateRange - both null returns all entries" {
+    const entries = [_]types.UsageEntry{
+        makeEntry("s1", "proj", 1736505000000, "model-a", 100, 10, 0, 0, 0.01), // 2025-01-10
+        makeEntry("s1", "proj", 1736937000000, "model-a", 200, 20, 0, 0, 0.02), // 2025-01-15
+    };
+
+    const result = try filterByDateRange(std.testing.allocator, &entries, null, null, 0);
+    defer std.testing.allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+}
+
+test "filterByDateRange - empty entries returns empty result" {
+    const entries = [_]types.UsageEntry{};
+
+    const result = try filterByDateRange(std.testing.allocator, &entries, "20250101", "20251231", 0);
+    defer std.testing.allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 0), result.len);
 }
 
 test "aggregateSession - last activity reflects latest timestamp" {
