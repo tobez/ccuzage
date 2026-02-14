@@ -2,6 +2,8 @@
 // ABOUTME: Defines types for token usage entries, aggregation, sessions, blocks, and CLI options.
 const std = @import("std");
 
+/// Fields `model`, `message_id`, and `request_id` are owned allocations that must be freed.
+/// Fields `session_id` and `project` are borrowed from the caller and must not be freed.
 pub const UsageEntry = struct {
     session_id: []const u8,
     project: []const u8,

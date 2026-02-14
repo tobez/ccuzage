@@ -60,7 +60,6 @@ pub fn parseLine(
 
     // Duplicate strings that need to outlive the parsed JSON
     const model = allocator.dupe(u8, model_raw) catch return null;
-    errdefer allocator.free(model);
 
     const message_id = if (message.id) |id|
         (allocator.dupe(u8, id) catch {
@@ -72,7 +71,6 @@ pub fn parseLine(
             allocator.free(model);
             return null;
         };
-    errdefer allocator.free(message_id);
 
     const request_id = if (json.requestId) |rid|
         (allocator.dupe(u8, rid) catch {
@@ -230,4 +228,34 @@ test "dedupKey - empty message_id returns null" {
 test "dedupKey - empty request_id returns null" {
     const key = dedupKey(std.testing.allocator, "msg-001", "");
     try std.testing.expect(key == null);
+}
+
+test "parseLine - isApiErrorMessage false parses normally" {
+    const line =
+        \\{"timestamp":"2025-01-15T10:30:00.000Z","message":{"usage":{"input_tokens":100,"output_tokens":50},"model":"claude-sonnet-4-20250514","id":"msg-001"},"requestId":"req-001","isApiErrorMessage":false}
+    ;
+    const entry = parseLine(std.testing.allocator, line, "sess", "proj");
+    try std.testing.expect(entry != null);
+    const e = entry.?;
+    defer {
+        std.testing.allocator.free(e.model);
+        std.testing.allocator.free(e.message_id);
+        std.testing.allocator.free(e.request_id);
+    }
+    try std.testing.expectEqual(@as(u64, 100), e.input_tokens);
+}
+
+test "parseLine - unknown fields are tolerated" {
+    const line =
+        \\{"timestamp":"2025-01-15T10:30:00.000Z","message":{"usage":{"input_tokens":100,"output_tokens":50},"model":"claude-sonnet-4-20250514","id":"msg-001","content":[{"text":"hello"}]},"costUSD":0.01,"requestId":"req-001","cwd":"/some/path","sessionId":"sess-from-json","version":"1.0.0","unknownField":42}
+    ;
+    const entry = parseLine(std.testing.allocator, line, "sess", "proj");
+    try std.testing.expect(entry != null);
+    const e = entry.?;
+    defer {
+        std.testing.allocator.free(e.model);
+        std.testing.allocator.free(e.message_id);
+        std.testing.allocator.free(e.request_id);
+    }
+    try std.testing.expectEqual(@as(u64, 100), e.input_tokens);
 }
