@@ -1,0 +1,11 @@
+.{
+    .name = .blazing,
+    .version = "0.1.0",
+    .fingerprint = 0x310d11eb74ce9089,
+    .minimum_zig_version = "0.15.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
