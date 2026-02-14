@@ -54,4 +54,5 @@ test {
     _ = @import("parser.zig");
     _ = @import("loader.zig");
     _ = @import("aggregate.zig");
+    _ = @import("json_output.zig");
 }
