@@ -1,0 +1,304 @@
+// ABOUTME: Aggregation logic for grouping usage entries by time period.
+// ABOUTME: Provides daily aggregation with per-model breakdowns sorted by cost.
+const std = @import("std");
+const types = @import("types.zig");
+const date = @import("date.zig");
+
+const StringHashMap = std.StringHashMap;
+
+const ModelAccumulator = struct {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    cost: f64,
+};
+
+const Accumulator = struct {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    total_cost: f64,
+    models: StringHashMap(ModelAccumulator),
+};
+
+pub fn aggregateDaily(
+    allocator: std.mem.Allocator,
+    entries: []const types.UsageEntry,
+    tz_offset_minutes: i32,
+) ![]types.AggregatedUsage {
+    var day_map = StringHashMap(Accumulator).init(allocator);
+    defer {
+        var it = day_map.iterator();
+        while (it.next()) |kv| {
+            kv.value_ptr.models.deinit();
+            allocator.free(kv.key_ptr.*);
+        }
+        day_map.deinit();
+    }
+
+    // Accumulate entries grouped by date string
+    for (entries) |entry| {
+        const date_buf = date.formatDaily(entry.timestamp, tz_offset_minutes);
+        const date_key = day_map.getKey(&date_buf) orelse blk: {
+            const duped = try allocator.dupe(u8, &date_buf);
+            break :blk duped;
+        };
+
+        const gop = try day_map.getOrPut(date_key);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{
+                .input_tokens = 0,
+                .output_tokens = 0,
+                .cache_creation_tokens = 0,
+                .cache_read_tokens = 0,
+                .total_cost = 0,
+                .models = StringHashMap(ModelAccumulator).init(allocator),
+            };
+        }
+
+        const acc = gop.value_ptr;
+        acc.input_tokens += entry.input_tokens;
+        acc.output_tokens += entry.output_tokens;
+        acc.cache_creation_tokens += entry.cache_creation_tokens;
+        acc.cache_read_tokens += entry.cache_read_tokens;
+        acc.total_cost += entry.cost_usd;
+
+        const model_gop = try acc.models.getOrPut(entry.model);
+        if (!model_gop.found_existing) {
+            model_gop.value_ptr.* = .{
+                .input_tokens = 0,
+                .output_tokens = 0,
+                .cache_creation_tokens = 0,
+                .cache_read_tokens = 0,
+                .cost = 0,
+            };
+        }
+        model_gop.value_ptr.input_tokens += entry.input_tokens;
+        model_gop.value_ptr.output_tokens += entry.output_tokens;
+        model_gop.value_ptr.cache_creation_tokens += entry.cache_creation_tokens;
+        model_gop.value_ptr.cache_read_tokens += entry.cache_read_tokens;
+        model_gop.value_ptr.cost += entry.cost_usd;
+    }
+
+    // Convert accumulators to AggregatedUsage results
+    const result = try allocator.alloc(types.AggregatedUsage, day_map.count());
+    var i: usize = 0;
+
+    var day_it = day_map.iterator();
+    while (day_it.next()) |kv| {
+        const date_str = kv.key_ptr.*;
+        const acc = kv.value_ptr;
+
+        // Build model breakdowns
+        const breakdown_count = acc.models.count();
+        const breakdowns = try allocator.alloc(types.ModelBreakdown, breakdown_count);
+        var bi: usize = 0;
+        var model_it = acc.models.iterator();
+        while (model_it.next()) |mkv| {
+            const macc = mkv.value_ptr.*;
+            breakdowns[bi] = .{
+                .model_name = try allocator.dupe(u8, mkv.key_ptr.*),
+                .input_tokens = macc.input_tokens,
+                .output_tokens = macc.output_tokens,
+                .cache_creation_tokens = macc.cache_creation_tokens,
+                .cache_read_tokens = macc.cache_read_tokens,
+                .cost = macc.cost,
+            };
+            bi += 1;
+        }
+
+        // Sort breakdowns by cost descending
+        std.mem.sort(types.ModelBreakdown, breakdowns, {}, struct {
+            fn lessThan(_: void, a: types.ModelBreakdown, b: types.ModelBreakdown) bool {
+                return a.cost > b.cost;
+            }
+        }.lessThan);
+
+        // Build models_used list from sorted breakdowns
+        const models_used = try allocator.alloc([]const u8, breakdown_count);
+        for (breakdowns, 0..) |bd, mi| {
+            models_used[mi] = try allocator.dupe(u8, bd.model_name);
+        }
+
+        // Dupe the period string for the result (the map key will be freed in defer)
+        const period = try allocator.dupe(u8, date_str);
+
+        result[i] = .{
+            .period = period,
+            .input_tokens = acc.input_tokens,
+            .output_tokens = acc.output_tokens,
+            .cache_creation_tokens = acc.cache_creation_tokens,
+            .cache_read_tokens = acc.cache_read_tokens,
+            .total_cost = acc.total_cost,
+            .models_used = models_used,
+            .model_breakdowns = breakdowns,
+            .project = null,
+        };
+        i += 1;
+    }
+
+    return result;
+}
+
+// =============================================================================
+// Test helpers
+// =============================================================================
+
+fn freeAggregated(allocator: std.mem.Allocator, items: []types.AggregatedUsage) void {
+    for (items) |item| {
+        allocator.free(item.period);
+        for (item.model_breakdowns) |mb| allocator.free(mb.model_name);
+        allocator.free(item.model_breakdowns);
+        for (item.models_used) |m| allocator.free(m);
+        allocator.free(item.models_used);
+    }
+    allocator.free(items);
+}
+
+fn makeEntry(
+    session_id: []const u8,
+    project: []const u8,
+    timestamp: i64,
+    model: []const u8,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    cost_usd: f64,
+) types.UsageEntry {
+    return .{
+        .session_id = session_id,
+        .project = project,
+        .timestamp = timestamp,
+        .model = model,
+        .input_tokens = input_tokens,
+        .output_tokens = output_tokens,
+        .cache_creation_tokens = cache_creation_tokens,
+        .cache_read_tokens = cache_read_tokens,
+        .cost_usd = cost_usd,
+        .message_id = "msg-001",
+        .request_id = "req-001",
+    };
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test "aggregateDaily - empty input returns empty result" {
+    const result = try aggregateDaily(std.testing.allocator, &.{}, 0);
+    defer freeAggregated(std.testing.allocator, result);
+    try std.testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "aggregateDaily - single day single model" {
+    const entries = [_]types.UsageEntry{
+        makeEntry("s1", "proj", 1736937000000, "claude-sonnet-4-20250514", 100, 10, 5, 50, 0.01), // 2025-01-15T10:30:00Z
+        makeEntry("s1", "proj", 1736940600000, "claude-sonnet-4-20250514", 200, 20, 10, 100, 0.02), // 2025-01-15T11:30:00Z
+        makeEntry("s1", "proj", 1736944200000, "claude-sonnet-4-20250514", 300, 30, 15, 150, 0.03), // 2025-01-15T12:30:00Z
+    };
+
+    const result = try aggregateDaily(std.testing.allocator, &entries, 0);
+    defer freeAggregated(std.testing.allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+
+    const day = result[0];
+    try std.testing.expectEqualStrings("2025-01-15", day.period);
+    try std.testing.expectEqual(@as(u64, 600), day.input_tokens);
+    try std.testing.expectEqual(@as(u64, 60), day.output_tokens);
+    try std.testing.expectEqual(@as(u64, 30), day.cache_creation_tokens);
+    try std.testing.expectEqual(@as(u64, 300), day.cache_read_tokens);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.06), day.total_cost, 0.0001);
+
+    try std.testing.expectEqual(@as(usize, 1), day.models_used.len);
+    try std.testing.expectEqualStrings("claude-sonnet-4-20250514", day.models_used[0]);
+
+    try std.testing.expectEqual(@as(usize, 1), day.model_breakdowns.len);
+    try std.testing.expectEqualStrings("claude-sonnet-4-20250514", day.model_breakdowns[0].model_name);
+    try std.testing.expectEqual(@as(u64, 600), day.model_breakdowns[0].input_tokens);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.06), day.model_breakdowns[0].cost, 0.0001);
+
+    try std.testing.expectEqual(@as(?[]const u8, null), day.project);
+}
+
+test "aggregateDaily - multiple days" {
+    const entries = [_]types.UsageEntry{
+        makeEntry("s1", "proj", 1736937000000, "claude-sonnet-4-20250514", 100, 10, 0, 0, 0.01), // 2025-01-15T10:30:00Z
+        makeEntry("s1", "proj", 1736940600000, "claude-sonnet-4-20250514", 200, 20, 0, 0, 0.02), // 2025-01-15T11:30:00Z
+        makeEntry("s1", "proj", 1737023400000, "claude-sonnet-4-20250514", 300, 30, 0, 0, 0.03), // 2025-01-16T10:30:00Z
+    };
+
+    const result = try aggregateDaily(std.testing.allocator, &entries, 0);
+    defer freeAggregated(std.testing.allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+
+    // Find each day (order not guaranteed)
+    var found_15 = false;
+    var found_16 = false;
+    for (result) |day| {
+        if (std.mem.eql(u8, day.period, "2025-01-15")) {
+            found_15 = true;
+            try std.testing.expectEqual(@as(u64, 300), day.input_tokens);
+            try std.testing.expectEqual(@as(u64, 30), day.output_tokens);
+            try std.testing.expectApproxEqAbs(@as(f64, 0.03), day.total_cost, 0.0001);
+        } else if (std.mem.eql(u8, day.period, "2025-01-16")) {
+            found_16 = true;
+            try std.testing.expectEqual(@as(u64, 300), day.input_tokens);
+            try std.testing.expectEqual(@as(u64, 30), day.output_tokens);
+            try std.testing.expectApproxEqAbs(@as(f64, 0.03), day.total_cost, 0.0001);
+        }
+    }
+    try std.testing.expect(found_15);
+    try std.testing.expect(found_16);
+}
+
+test "aggregateDaily - multiple models sorted by cost descending" {
+    const entries = [_]types.UsageEntry{
+        makeEntry("s1", "proj", 1736937000000, "model-a", 100, 10, 0, 0, 2.0), // model A entry 1
+        makeEntry("s1", "proj", 1736940600000, "model-a", 100, 10, 0, 0, 3.0), // model A entry 2
+        makeEntry("s1", "proj", 1736944200000, "model-b", 500, 50, 0, 0, 10.0), // model B
+        makeEntry("s1", "proj", 1736947800000, "model-c", 50, 5, 0, 0, 1.0), // model C
+    };
+
+    const result = try aggregateDaily(std.testing.allocator, &entries, 0);
+    defer freeAggregated(std.testing.allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+    const day = result[0];
+
+    // Total cost: 2+3+10+1 = 16
+    try std.testing.expectApproxEqAbs(@as(f64, 16.0), day.total_cost, 0.0001);
+
+    // 3 unique models
+    try std.testing.expectEqual(@as(usize, 3), day.models_used.len);
+
+    // Model breakdowns sorted by cost descending: B(10), A(5), C(1)
+    try std.testing.expectEqual(@as(usize, 3), day.model_breakdowns.len);
+    try std.testing.expectEqualStrings("model-b", day.model_breakdowns[0].model_name);
+    try std.testing.expectApproxEqAbs(@as(f64, 10.0), day.model_breakdowns[0].cost, 0.0001);
+
+    try std.testing.expectEqualStrings("model-a", day.model_breakdowns[1].model_name);
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0), day.model_breakdowns[1].cost, 0.0001);
+
+    try std.testing.expectEqualStrings("model-c", day.model_breakdowns[2].model_name);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), day.model_breakdowns[2].cost, 0.0001);
+}
+
+test "aggregateDaily - timezone affects grouping" {
+    // 2025-01-15T23:30:00Z = epoch ms 1736983800000
+    // With tz_offset=120 (+02:00), local time is 2025-01-16T01:30:00
+    // Should be grouped under "2025-01-16"
+    const entries = [_]types.UsageEntry{
+        makeEntry("s1", "proj", 1736983800000, "claude-sonnet-4-20250514", 100, 10, 0, 0, 0.01),
+    };
+
+    const result = try aggregateDaily(std.testing.allocator, &entries, 120);
+    defer freeAggregated(std.testing.allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+    try std.testing.expectEqualStrings("2025-01-16", result[0].period);
+}

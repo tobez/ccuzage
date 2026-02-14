@@ -53,4 +53,5 @@ test {
     _ = @import("types.zig");
     _ = @import("parser.zig");
     _ = @import("loader.zig");
+    _ = @import("aggregate.zig");
 }
