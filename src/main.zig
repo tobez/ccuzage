@@ -50,4 +50,5 @@ test "module compiles" {
 
 test {
     _ = @import("date.zig");
+    _ = @import("types.zig");
 }
