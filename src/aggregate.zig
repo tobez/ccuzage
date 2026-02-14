@@ -1,5 +1,5 @@
 // ABOUTME: Aggregation logic for grouping usage entries by time period.
-// ABOUTME: Provides daily aggregation with per-model breakdowns sorted by cost.
+// ABOUTME: Provides daily, monthly, and weekly aggregation with per-model breakdowns sorted by cost.
 const std = @import("std");
 const types = @import("types.zig");
 const date = @import("date.zig");
@@ -23,30 +23,67 @@ const Accumulator = struct {
     models: StringHashMap(ModelAccumulator),
 };
 
-pub fn aggregateDaily(
+const PeriodMode = union(enum) {
+    daily,
+    monthly,
+    weekly: u8, // week_start_day: 0=Sunday, 1=Monday, etc.
+};
+
+const PeriodKey = struct {
+    buf: [10]u8,
+    len: u8,
+
+    fn slice(self: *const PeriodKey) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+/// Compute the period key for an entry's timestamp given the grouping mode.
+fn computePeriodKey(mode: PeriodMode, timestamp: i64, tz_offset_minutes: i32) PeriodKey {
+    switch (mode) {
+        .daily => {
+            const buf = date.formatDaily(timestamp, tz_offset_minutes);
+            return .{ .buf = buf, .len = 10 };
+        },
+        .monthly => {
+            const buf = date.formatMonthly(timestamp, tz_offset_minutes);
+            var result: PeriodKey = .{ .buf = undefined, .len = 7 };
+            @memcpy(result.buf[0..7], &buf);
+            return result;
+        },
+        .weekly => |start_day| {
+            const buf = date.weekStart(timestamp, tz_offset_minutes, start_day);
+            return .{ .buf = buf, .len = 10 };
+        },
+    }
+}
+
+fn aggregateByPeriod(
     allocator: std.mem.Allocator,
     entries: []const types.UsageEntry,
     tz_offset_minutes: i32,
+    mode: PeriodMode,
 ) ![]types.AggregatedUsage {
-    var day_map = StringHashMap(Accumulator).init(allocator);
+    var period_map = StringHashMap(Accumulator).init(allocator);
     defer {
-        var it = day_map.iterator();
+        var it = period_map.iterator();
         while (it.next()) |kv| {
             kv.value_ptr.models.deinit();
             allocator.free(kv.key_ptr.*);
         }
-        day_map.deinit();
+        period_map.deinit();
     }
 
-    // Accumulate entries grouped by date string
+    // Accumulate entries grouped by period key
     for (entries) |entry| {
-        const date_buf = date.formatDaily(entry.timestamp, tz_offset_minutes);
-        const date_key = day_map.getKey(&date_buf) orelse blk: {
-            const duped = try allocator.dupe(u8, &date_buf);
+        const pk = computePeriodKey(mode, entry.timestamp, tz_offset_minutes);
+        const key_slice = pk.slice();
+        const period_key = period_map.getKey(key_slice) orelse blk: {
+            const duped = try allocator.dupe(u8, key_slice);
             break :blk duped;
         };
 
-        const gop = try day_map.getOrPut(date_key);
+        const gop = try period_map.getOrPut(period_key);
         if (!gop.found_existing) {
             gop.value_ptr.* = .{
                 .input_tokens = 0,
@@ -83,12 +120,12 @@ pub fn aggregateDaily(
     }
 
     // Convert accumulators to AggregatedUsage results
-    const result = try allocator.alloc(types.AggregatedUsage, day_map.count());
+    const result = try allocator.alloc(types.AggregatedUsage, period_map.count());
     var i: usize = 0;
 
-    var day_it = day_map.iterator();
-    while (day_it.next()) |kv| {
-        const date_str = kv.key_ptr.*;
+    var period_it = period_map.iterator();
+    while (period_it.next()) |kv| {
+        const period_str = kv.key_ptr.*;
         const acc = kv.value_ptr;
 
         // Build model breakdowns
@@ -123,7 +160,7 @@ pub fn aggregateDaily(
         }
 
         // Dupe the period string for the result (the map key will be freed in defer)
-        const period = try allocator.dupe(u8, date_str);
+        const period = try allocator.dupe(u8, period_str);
 
         result[i] = .{
             .period = period,
@@ -140,6 +177,31 @@ pub fn aggregateDaily(
     }
 
     return result;
+}
+
+pub fn aggregateDaily(
+    allocator: std.mem.Allocator,
+    entries: []const types.UsageEntry,
+    tz_offset_minutes: i32,
+) ![]types.AggregatedUsage {
+    return aggregateByPeriod(allocator, entries, tz_offset_minutes, .daily);
+}
+
+pub fn aggregateMonthly(
+    allocator: std.mem.Allocator,
+    entries: []const types.UsageEntry,
+    tz_offset_minutes: i32,
+) ![]types.AggregatedUsage {
+    return aggregateByPeriod(allocator, entries, tz_offset_minutes, .monthly);
+}
+
+pub fn aggregateWeekly(
+    allocator: std.mem.Allocator,
+    entries: []const types.UsageEntry,
+    tz_offset_minutes: i32,
+    week_start_day: u8,
+) ![]types.AggregatedUsage {
+    return aggregateByPeriod(allocator, entries, tz_offset_minutes, .{ .weekly = week_start_day });
 }
 
 // =============================================================================
@@ -301,4 +363,107 @@ test "aggregateDaily - timezone affects grouping" {
 
     try std.testing.expectEqual(@as(usize, 1), result.len);
     try std.testing.expectEqualStrings("2025-01-16", result[0].period);
+}
+
+test "aggregateMonthly - groups entries by month" {
+    const entries = [_]types.UsageEntry{
+        makeEntry("s1", "proj", 1736937000000, "model-a", 100, 10, 5, 50, 0.01), // 2025-01-15T10:30:00Z
+        makeEntry("s1", "proj", 1737369000000, "model-a", 200, 20, 10, 100, 0.02), // 2025-01-20T10:30:00Z
+        makeEntry("s1", "proj", 1738396200000, "model-b", 300, 30, 15, 150, 0.03), // 2025-02-01T10:30:00Z
+    };
+
+    const result = try aggregateMonthly(std.testing.allocator, &entries, 0);
+    defer freeAggregated(std.testing.allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+
+    var found_jan = false;
+    var found_feb = false;
+    for (result) |item| {
+        if (std.mem.eql(u8, item.period, "2025-01")) {
+            found_jan = true;
+            try std.testing.expectEqual(@as(u64, 300), item.input_tokens);
+            try std.testing.expectEqual(@as(u64, 30), item.output_tokens);
+            try std.testing.expectEqual(@as(u64, 15), item.cache_creation_tokens);
+            try std.testing.expectEqual(@as(u64, 150), item.cache_read_tokens);
+            try std.testing.expectApproxEqAbs(@as(f64, 0.03), item.total_cost, 0.0001);
+        } else if (std.mem.eql(u8, item.period, "2025-02")) {
+            found_feb = true;
+            try std.testing.expectEqual(@as(u64, 300), item.input_tokens);
+            try std.testing.expectEqual(@as(u64, 30), item.output_tokens);
+            try std.testing.expectEqual(@as(u64, 15), item.cache_creation_tokens);
+            try std.testing.expectEqual(@as(u64, 150), item.cache_read_tokens);
+            try std.testing.expectApproxEqAbs(@as(f64, 0.03), item.total_cost, 0.0001);
+        }
+    }
+    try std.testing.expect(found_jan);
+    try std.testing.expect(found_feb);
+}
+
+test "aggregateWeekly - week starts Sunday" {
+    // Mon 2025-01-13T10:30:00Z = 1736764200000  (week starting Sun 2025-01-12)
+    // Wed 2025-01-15T10:30:00Z = 1736937000000  (week starting Sun 2025-01-12)
+    // Mon 2025-01-20T10:30:00Z = 1737369000000  (week starting Sun 2025-01-19)
+    const entries = [_]types.UsageEntry{
+        makeEntry("s1", "proj", 1736764200000, "model-a", 100, 10, 5, 50, 0.01),
+        makeEntry("s1", "proj", 1736937000000, "model-a", 200, 20, 10, 100, 0.02),
+        makeEntry("s1", "proj", 1737369000000, "model-b", 300, 30, 15, 150, 0.03),
+    };
+
+    const result = try aggregateWeekly(std.testing.allocator, &entries, 0, 0);
+    defer freeAggregated(std.testing.allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+
+    var found_w12 = false;
+    var found_w19 = false;
+    for (result) |item| {
+        if (std.mem.eql(u8, item.period, "2025-01-12")) {
+            found_w12 = true;
+            try std.testing.expectEqual(@as(u64, 300), item.input_tokens);
+            try std.testing.expectEqual(@as(u64, 30), item.output_tokens);
+            try std.testing.expectApproxEqAbs(@as(f64, 0.03), item.total_cost, 0.0001);
+        } else if (std.mem.eql(u8, item.period, "2025-01-19")) {
+            found_w19 = true;
+            try std.testing.expectEqual(@as(u64, 300), item.input_tokens);
+            try std.testing.expectEqual(@as(u64, 30), item.output_tokens);
+            try std.testing.expectApproxEqAbs(@as(f64, 0.03), item.total_cost, 0.0001);
+        }
+    }
+    try std.testing.expect(found_w12);
+    try std.testing.expect(found_w19);
+}
+
+test "aggregateWeekly - week starts Monday" {
+    // Mon 2025-01-13T10:30:00Z = 1736764200000  (week starting Mon 2025-01-13)
+    // Wed 2025-01-15T10:30:00Z = 1736937000000  (week starting Mon 2025-01-13)
+    // Mon 2025-01-20T10:30:00Z = 1737369000000  (week starting Mon 2025-01-20)
+    const entries = [_]types.UsageEntry{
+        makeEntry("s1", "proj", 1736764200000, "model-a", 100, 10, 5, 50, 0.01),
+        makeEntry("s1", "proj", 1736937000000, "model-a", 200, 20, 10, 100, 0.02),
+        makeEntry("s1", "proj", 1737369000000, "model-b", 300, 30, 15, 150, 0.03),
+    };
+
+    const result = try aggregateWeekly(std.testing.allocator, &entries, 0, 1);
+    defer freeAggregated(std.testing.allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+
+    var found_w13 = false;
+    var found_w20 = false;
+    for (result) |item| {
+        if (std.mem.eql(u8, item.period, "2025-01-13")) {
+            found_w13 = true;
+            try std.testing.expectEqual(@as(u64, 300), item.input_tokens);
+            try std.testing.expectEqual(@as(u64, 30), item.output_tokens);
+            try std.testing.expectApproxEqAbs(@as(f64, 0.03), item.total_cost, 0.0001);
+        } else if (std.mem.eql(u8, item.period, "2025-01-20")) {
+            found_w20 = true;
+            try std.testing.expectEqual(@as(u64, 300), item.input_tokens);
+            try std.testing.expectEqual(@as(u64, 30), item.output_tokens);
+            try std.testing.expectApproxEqAbs(@as(f64, 0.03), item.total_cost, 0.0001);
+        }
+    }
+    try std.testing.expect(found_w13);
+    try std.testing.expect(found_w20);
 }
