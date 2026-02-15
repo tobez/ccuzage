@@ -161,6 +161,18 @@ pub fn weekStart(epoch_ms: i64, tz_offset_minutes: i32, start_day: u8) [10]u8 {
     return buf;
 }
 
+/// Convert a YYYYMMDD filter date string to epoch milliseconds at midnight UTC.
+/// Returns null if the string is not a valid 8-digit date.
+pub fn filterDateToEpochMs(date_str: []const u8) ?i64 {
+    if (date_str.len != 8) return null;
+    const year = parseDigits(u16, date_str[0..4]) orelse return null;
+    const month = parseDigits(u8, date_str[4..6]) orelse return null;
+    const day = parseDigits(u8, date_str[6..8]) orelse return null;
+    if (month < 1 or month > 12) return null;
+    if (day < 1 or day > daysInMonth(year, month)) return null;
+    return civilToEpochDays(year, month, day) * 86400000;
+}
+
 /// Strip dashes from "YYYY-MM-DD" to get "YYYYMMDD" for comparison.
 pub fn dailyToFilterDate(daily: *const [10]u8) [8]u8 {
     return .{
@@ -419,6 +431,32 @@ test "dailyToFilterDate - different date" {
     const daily: [10]u8 = "2024-12-31".*;
     const result = dailyToFilterDate(&daily);
     try std.testing.expectEqualStrings("20241231", &result);
+}
+
+test "filterDateToEpochMs - basic" {
+    // 20250115 midnight UTC = 2025-01-15T00:00:00Z
+    const result = filterDateToEpochMs("20250115");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(i64, 1736899200000), result.?);
+}
+
+test "filterDateToEpochMs - epoch start" {
+    const result = filterDateToEpochMs("19700101");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(i64, 0), result.?);
+}
+
+test "filterDateToEpochMs - invalid format" {
+    try std.testing.expect(filterDateToEpochMs("2025-01-15") == null);
+    try std.testing.expect(filterDateToEpochMs("abcdefgh") == null);
+    try std.testing.expect(filterDateToEpochMs("202501") == null);
+    try std.testing.expect(filterDateToEpochMs("") == null);
+}
+
+test "filterDateToEpochMs - roundtrip with formatDaily" {
+    const epoch = filterDateToEpochMs("20260201").?;
+    const daily = formatDaily(epoch, 0);
+    try std.testing.expectEqualStrings("2026-02-01", &daily);
 }
 
 test "parseIso8601 roundtrip with formatIso8601Output" {

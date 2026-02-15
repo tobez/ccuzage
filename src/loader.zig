@@ -1,8 +1,19 @@
 // ABOUTME: Loads JSONL files, discovers them in Claude Code data directories, and deduplicates entries.
 // ABOUTME: Provides file discovery, path extraction, and the full loading pipeline.
 const std = @import("std");
+const builtin = @import("builtin");
+const posix = std.posix;
 const types = @import("types.zig");
 const parser = @import("parser.zig");
+
+/// Cutoff timestamps for skipping files based on filesystem metadata.
+/// All values are in nanoseconds since Unix epoch.
+pub const FileTimeFilter = struct {
+    /// Skip files whose mtime < this value (file wasn't modified after the since date)
+    since_cutoff_ns: ?i128 = null,
+    /// Skip files whose birthtime >= this value (file was created after the until date)
+    until_cutoff_ns: ?i128 = null,
+};
 
 pub fn loadEntriesFromLines(
     allocator: std.mem.Allocator,
@@ -159,9 +170,39 @@ fn collectJsonlFiles(allocator: std.mem.Allocator, dir_path: []const u8, files: 
     }
 }
 
+/// Get file birthtime in nanoseconds. Returns null on platforms that don't support it.
+fn getFileBirthTimeNs(file: std.fs.File) ?i128 {
+    if (comptime builtin.os.tag.isDarwin()) {
+        const stat = posix.fstat(file.handle) catch return null;
+        const btime = stat.birthtime();
+        return @as(i128, btime.sec) * 1_000_000_000 + btime.nsec;
+    }
+    // Linux: could use statx with STATX_BTIME, but not worth the complexity for now
+    return null;
+}
+
+/// Check if a file should be skipped based on its filesystem timestamps.
+fn shouldSkipFile(file: std.fs.File, filter: FileTimeFilter) bool {
+    if (filter.since_cutoff_ns == null and filter.until_cutoff_ns == null) return false;
+
+    if (filter.since_cutoff_ns) |cutoff| {
+        const stat = file.stat() catch return false;
+        if (stat.mtime < cutoff) return true;
+    }
+
+    if (filter.until_cutoff_ns) |cutoff| {
+        if (getFileBirthTimeNs(file)) |btime| {
+            if (btime >= cutoff) return true;
+        }
+    }
+
+    return false;
+}
+
 /// Loads all usage entries from all discovered JSONL files.
 /// Deduplication is global across all files.
-pub fn loadAllEntries(allocator: std.mem.Allocator) ![]types.UsageEntry {
+/// When time_filter is provided, files are skipped based on mtime/birthtime.
+pub fn loadAllEntries(allocator: std.mem.Allocator, time_filter: FileTimeFilter) ![]types.UsageEntry {
     const file_paths = try discoverJsonlFiles(allocator);
     defer {
         for (file_paths) |p| allocator.free(p);
@@ -192,6 +233,10 @@ pub fn loadAllEntries(allocator: std.mem.Allocator) ![]types.UsageEntry {
         // Read the file
         const file = std.fs.openFileAbsolute(file_path, .{}) catch continue;
         defer file.close();
+
+        // Skip files outside the date range based on filesystem timestamps
+        if (shouldSkipFile(file, time_filter)) continue;
+
         const contents = file.readToEndAlloc(allocator, 256 * 1024 * 1024) catch continue;
         defer allocator.free(contents);
 

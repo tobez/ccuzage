@@ -176,8 +176,25 @@ pub fn main() !void {
         return;
     }
 
-    // Load all entries
-    const all_entries = loader.loadAllEntries(allocator) catch {
+    // Compute file-level time filter from --since/--until
+    var time_filter = loader.FileTimeFilter{};
+    if (opts.since) |since| {
+        if (date.filterDateToEpochMs(since)) |epoch_ms| {
+            // Start of since date in user's timezone, converted to UTC nanoseconds
+            const utc_ms = epoch_ms - @as(i64, tz_offset) * 60_000;
+            time_filter.since_cutoff_ns = @as(i128, utc_ms) * 1_000_000;
+        }
+    }
+    if (opts.until) |until| {
+        if (date.filterDateToEpochMs(until)) |epoch_ms| {
+            // End of until date = start of next day in user's timezone, converted to UTC nanoseconds
+            const utc_ms = epoch_ms + 86_400_000 - @as(i64, tz_offset) * 60_000;
+            time_filter.until_cutoff_ns = @as(i128, utc_ms) * 1_000_000;
+        }
+    }
+
+    // Load all entries, skipping files outside the date range
+    const all_entries = loader.loadAllEntries(allocator, time_filter) catch {
         try stderr_print("Error: failed to load usage data\n");
         std.process.exit(1);
     };
