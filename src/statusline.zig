@@ -56,11 +56,11 @@ pub fn parseStatuslineInput(allocator: std.mem.Allocator, input: []const u8) !st
     };
 }
 
-fn formatCurrency(buf: []u8, amount: f64) []u8 {
+pub fn formatCurrency(buf: []u8, amount: f64) []u8 {
     return std.fmt.bufPrint(buf, "${d:.2}", .{amount}) catch buf[0..0];
 }
 
-fn formatTokenCount(buf: []u8, count: u64) []u8 {
+pub fn formatTokenCount(buf: []u8, count: u64) []u8 {
     if (count == 0) {
         buf[0] = '0';
         return buf[0..1];
