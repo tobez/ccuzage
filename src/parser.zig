@@ -3,27 +3,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const date = @import("date.zig");
-
-const JsonUsage = struct {
-    input_tokens: ?u64 = null,
-    output_tokens: ?u64 = null,
-    cache_creation_input_tokens: ?u64 = null,
-    cache_read_input_tokens: ?u64 = null,
-};
-
-const JsonMessage = struct {
-    usage: ?JsonUsage = null,
-    model: ?[]const u8 = null,
-    id: ?[]const u8 = null,
-};
-
-const JsonLine = struct {
-    timestamp: ?[]const u8 = null,
-    message: ?JsonMessage = null,
-    costUSD: ?f64 = null,
-    requestId: ?[]const u8 = null,
-    isApiErrorMessage: ?bool = null,
-};
+const scanner = @import("scanner.zig");
 
 pub fn parseLine(
     allocator: std.mem.Allocator,
@@ -33,35 +13,22 @@ pub fn parseLine(
 ) ?types.UsageEntry {
     if (line.len == 0) return null;
 
-    const parsed = std.json.parseFromSlice(JsonLine, allocator, line, .{
-        .ignore_unknown_fields = true,
-    }) catch return null;
-    defer parsed.deinit();
-
-    const json = parsed.value;
+    const scanned = scanner.scanLine(line) orelse return null;
 
     // Skip API error messages
-    if (json.isApiErrorMessage) |is_err| {
-        if (is_err) return null;
-    }
+    if (scanned.is_api_error) return null;
 
     // Required: timestamp
-    const timestamp_str = json.timestamp orelse return null;
+    const timestamp_str = scanned.timestamp orelse return null;
     const timestamp = date.parseIso8601(timestamp_str) catch return null;
 
-    // Required: message
-    const message = json.message orelse return null;
+    // Required: model
+    const model_raw = scanned.model orelse return null;
 
-    // Required: message.usage
-    const usage = message.usage orelse return null;
-
-    // Required: message.model
-    const model_raw = message.model orelse return null;
-
-    // Duplicate strings that need to outlive the parsed JSON
+    // Duplicate strings that need to outlive the input buffer
     const model = allocator.dupe(u8, model_raw) catch return null;
 
-    const message_id = if (message.id) |id|
+    const message_id = if (scanned.message_id) |id|
         (allocator.dupe(u8, id) catch {
             allocator.free(model);
             return null;
@@ -72,7 +39,7 @@ pub fn parseLine(
             return null;
         };
 
-    const request_id = if (json.requestId) |rid|
+    const request_id = if (scanned.request_id) |rid|
         (allocator.dupe(u8, rid) catch {
             allocator.free(model);
             allocator.free(message_id);
@@ -90,11 +57,11 @@ pub fn parseLine(
         .project = project,
         .timestamp = timestamp,
         .model = model,
-        .input_tokens = usage.input_tokens orelse 0,
-        .output_tokens = usage.output_tokens orelse 0,
-        .cache_creation_tokens = usage.cache_creation_input_tokens orelse 0,
-        .cache_read_tokens = usage.cache_read_input_tokens orelse 0,
-        .cost_usd = json.costUSD orelse 0.0,
+        .input_tokens = scanned.input_tokens,
+        .output_tokens = scanned.output_tokens,
+        .cache_creation_tokens = scanned.cache_creation_tokens,
+        .cache_read_tokens = scanned.cache_read_tokens,
+        .cost_usd = scanned.cost_usd orelse 0.0,
         .message_id = message_id,
         .request_id = request_id,
     };

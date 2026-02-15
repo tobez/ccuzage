@@ -466,4 +466,5 @@ test {
     _ = @import("blocks.zig");
     _ = @import("statusline.zig");
     _ = @import("integration_test.zig");
+    _ = @import("scanner.zig");
 }
