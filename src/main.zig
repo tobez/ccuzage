@@ -570,6 +570,7 @@ test {
     _ = @import("json_output.zig");
     _ = @import("blocks.zig");
     _ = @import("statusline.zig");
+    _ = @import("table_output.zig");
     _ = @import("integration_test.zig");
     _ = @import("scanner.zig");
     _ = @import("pricing.zig");
