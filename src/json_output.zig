@@ -1,5 +1,5 @@
 // ABOUTME: Serializes aggregated usage data to JSON matching the ccusage output format.
-// ABOUTME: Provides camelCase JSON output for daily, monthly, and weekly reports.
+// ABOUTME: Provides camelCase JSON output for daily, monthly, weekly, and session reports.
 const std = @import("std");
 const types = @import("types.zig");
 
@@ -137,6 +137,70 @@ pub fn reportToJson(
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     try writeReportJson(&aw.writer, command_name, period_key, items, totals);
+    return aw.toOwnedSlice();
+}
+
+/// Writes a single session usage item as JSON.
+fn writeSessionItem(w: *Writer, item: types.SessionUsage) Writer.Error!void {
+    try w.writeAll("{\"sessionId\":");
+    try writeJsonString(w, item.session_id);
+
+    try w.writeAll(",\"inputTokens\":");
+    try writeJsonInt(w, item.input_tokens);
+    try w.writeAll(",\"outputTokens\":");
+    try writeJsonInt(w, item.output_tokens);
+    try w.writeAll(",\"cacheCreationTokens\":");
+    try writeJsonInt(w, item.cache_creation_tokens);
+    try w.writeAll(",\"cacheReadTokens\":");
+    try writeJsonInt(w, item.cache_read_tokens);
+    try w.writeAll(",\"totalTokens\":");
+    try writeJsonInt(w, item.input_tokens + item.output_tokens + item.cache_creation_tokens + item.cache_read_tokens);
+    try w.writeAll(",\"totalCost\":");
+    try writeJsonFloat(w, item.total_cost);
+    try w.writeAll(",\"lastActivity\":");
+    try writeJsonString(w, item.last_activity);
+
+    // modelsUsed array
+    try w.writeAll(",\"modelsUsed\":[");
+    for (item.models_used, 0..) |model, i| {
+        if (i > 0) try w.writeByte(',');
+        try writeJsonString(w, model);
+    }
+    try w.writeByte(']');
+
+    // modelBreakdowns array
+    try w.writeAll(",\"modelBreakdowns\":[");
+    for (item.model_breakdowns, 0..) |mb, i| {
+        if (i > 0) try w.writeByte(',');
+        try writeModelBreakdown(w, mb);
+    }
+    try w.writeByte(']');
+
+    try w.writeAll(",\"projectPath\":");
+    try writeJsonString(w, item.project_path);
+
+    try w.writeAll("}");
+}
+
+/// Writes a full session report (items + totals) as JSON to the given writer.
+pub fn writeSessionJson(w: *Writer, items: []const types.SessionUsage, totals: types.Totals) Writer.Error!void {
+    try w.writeAll("{\"sessions\":[");
+
+    for (items, 0..) |item, i| {
+        if (i > 0) try w.writeByte(',');
+        try writeSessionItem(w, item);
+    }
+
+    try w.writeAll("],\"totals\":");
+    try writeTotals(w, totals);
+    try w.writeByte('}');
+}
+
+/// Returns an allocated JSON string for session data.
+pub fn sessionToJson(allocator: std.mem.Allocator, items: []const types.SessionUsage, totals: types.Totals) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try writeSessionJson(&aw.writer, items, totals);
     return aw.toOwnedSlice();
 }
 
@@ -400,6 +464,171 @@ test "empty items array" {
 
     const daily_arr = root.get("daily").?.array;
     try testing.expectEqual(@as(usize, 0), daily_arr.items.len);
+
+    const tot = root.get("totals").?.object;
+    try testing.expectEqual(@as(i64, 0), tot.get("inputTokens").?.integer);
+    try testing.expectEqual(@as(i64, 0), tot.get("outputTokens").?.integer);
+    try testing.expectEqual(@as(i64, 0), tot.get("totalTokens").?.integer);
+    try testing.expectApproxEqAbs(0.0, tot.get("totalCost").?.float, 0.000001);
+}
+
+test "session JSON structure with all fields" {
+    const allocator = testing.allocator;
+
+    const models_used = [_][]const u8{"claude-sonnet-4-20250514"};
+    const breakdowns = [_]types.ModelBreakdown{
+        .{
+            .model_name = "claude-sonnet-4-20250514",
+            .input_tokens = 1000,
+            .output_tokens = 50,
+            .cache_creation_tokens = 100,
+            .cache_read_tokens = 500,
+            .cost = 0.05,
+        },
+    };
+
+    const items = [_]types.SessionUsage{
+        .{
+            .session_id = "abc-123",
+            .project_path = "myproject",
+            .input_tokens = 1000,
+            .output_tokens = 50,
+            .cache_creation_tokens = 100,
+            .cache_read_tokens = 500,
+            .total_cost = 0.05,
+            .last_activity = "2025-01-15",
+            .models_used = &models_used,
+            .model_breakdowns = &breakdowns,
+        },
+    };
+
+    const totals = types.Totals{
+        .input_tokens = 1000,
+        .output_tokens = 50,
+        .cache_creation_tokens = 100,
+        .cache_read_tokens = 500,
+        .total_tokens = 1650,
+        .total_cost = 0.05,
+    };
+
+    const json_str = try sessionToJson(allocator, &items, totals);
+    defer allocator.free(json_str);
+
+    const parsed = try parseJsonValue(allocator, json_str);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    // Top-level has "sessions" array and "totals" object
+    const sessions_arr = root.get("sessions").?.array;
+    try testing.expectEqual(@as(usize, 1), sessions_arr.items.len);
+
+    const first = sessions_arr.items[0].object;
+    try testing.expectEqualStrings("abc-123", first.get("sessionId").?.string);
+    try testing.expectEqual(@as(i64, 1000), first.get("inputTokens").?.integer);
+    try testing.expectEqual(@as(i64, 50), first.get("outputTokens").?.integer);
+    try testing.expectEqual(@as(i64, 100), first.get("cacheCreationTokens").?.integer);
+    try testing.expectEqual(@as(i64, 500), first.get("cacheReadTokens").?.integer);
+    try testing.expectEqual(@as(i64, 1650), first.get("totalTokens").?.integer);
+    try testing.expectApproxEqAbs(0.05, first.get("totalCost").?.float, 0.000001);
+    try testing.expectEqualStrings("2025-01-15", first.get("lastActivity").?.string);
+    try testing.expectEqualStrings("myproject", first.get("projectPath").?.string);
+
+    // modelsUsed
+    const models = first.get("modelsUsed").?.array;
+    try testing.expectEqual(@as(usize, 1), models.items.len);
+    try testing.expectEqualStrings("claude-sonnet-4-20250514", models.items[0].string);
+
+    // modelBreakdowns
+    const mbs = first.get("modelBreakdowns").?.array;
+    try testing.expectEqual(@as(usize, 1), mbs.items.len);
+    try testing.expectEqualStrings("claude-sonnet-4-20250514", mbs.items[0].object.get("modelName").?.string);
+
+    // totals
+    const tot = root.get("totals").?.object;
+    try testing.expectEqual(@as(i64, 1000), tot.get("inputTokens").?.integer);
+    try testing.expectEqual(@as(i64, 50), tot.get("outputTokens").?.integer);
+    try testing.expectEqual(@as(i64, 1650), tot.get("totalTokens").?.integer);
+    try testing.expectApproxEqAbs(0.05, tot.get("totalCost").?.float, 0.000001);
+}
+
+test "session JSON with multiple sessions" {
+    const allocator = testing.allocator;
+
+    const items = [_]types.SessionUsage{
+        .{
+            .session_id = "sess-1",
+            .project_path = "project-a",
+            .input_tokens = 500,
+            .output_tokens = 25,
+            .cache_creation_tokens = 50,
+            .cache_read_tokens = 200,
+            .total_cost = 0.02,
+            .last_activity = "2025-01-14",
+            .models_used = &.{},
+            .model_breakdowns = &.{},
+        },
+        .{
+            .session_id = "sess-2",
+            .project_path = "project-b",
+            .input_tokens = 800,
+            .output_tokens = 40,
+            .cache_creation_tokens = 80,
+            .cache_read_tokens = 300,
+            .total_cost = 0.03,
+            .last_activity = "2025-01-15",
+            .models_used = &.{},
+            .model_breakdowns = &.{},
+        },
+    };
+
+    const totals = types.Totals{
+        .input_tokens = 1300,
+        .output_tokens = 65,
+        .cache_creation_tokens = 130,
+        .cache_read_tokens = 500,
+        .total_tokens = 1995,
+        .total_cost = 0.05,
+    };
+
+    const json_str = try sessionToJson(allocator, &items, totals);
+    defer allocator.free(json_str);
+
+    const parsed = try parseJsonValue(allocator, json_str);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    const sessions_arr = root.get("sessions").?.array;
+    try testing.expectEqual(@as(usize, 2), sessions_arr.items.len);
+
+    try testing.expectEqualStrings("sess-1", sessions_arr.items[0].object.get("sessionId").?.string);
+    try testing.expectEqualStrings("sess-2", sessions_arr.items[1].object.get("sessionId").?.string);
+    try testing.expectEqualStrings("project-a", sessions_arr.items[0].object.get("projectPath").?.string);
+    try testing.expectEqualStrings("project-b", sessions_arr.items[1].object.get("projectPath").?.string);
+}
+
+test "session JSON with empty sessions array" {
+    const allocator = testing.allocator;
+
+    const items = [_]types.SessionUsage{};
+
+    const totals = types.Totals{
+        .input_tokens = 0,
+        .output_tokens = 0,
+        .cache_creation_tokens = 0,
+        .cache_read_tokens = 0,
+        .total_tokens = 0,
+        .total_cost = 0.0,
+    };
+
+    const json_str = try sessionToJson(allocator, &items, totals);
+    defer allocator.free(json_str);
+
+    const parsed = try parseJsonValue(allocator, json_str);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    const sessions_arr = root.get("sessions").?.array;
+    try testing.expectEqual(@as(usize, 0), sessions_arr.items.len);
 
     const tot = root.get("totals").?.object;
     try testing.expectEqual(@as(i64, 0), tot.get("inputTokens").?.integer);
