@@ -113,6 +113,8 @@ pub const Command = enum {
 
 pub const SortOrder = enum { asc, desc };
 
+pub const ColumnLevel = enum { min, mid, full };
+
 pub const BurnRateVisual = enum { off, emoji, text, emoji_text };
 
 pub const CliOptions = struct {
@@ -131,12 +133,13 @@ pub const CliOptions = struct {
     session_length: u32, // hours, default 5
     token_limit: ?u64,
     burn_rate_visual: BurnRateVisual,
+    column_level: ColumnLevel,
 
     pub const default = CliOptions{
         .command = .daily,
         .since = null,
         .until = null,
-        .json = true, // JSON-first approach
+        .json = false,
         .breakdown = false,
         .timezone_offset_minutes = null,
         .order = .desc,
@@ -147,6 +150,7 @@ pub const CliOptions = struct {
         .session_length = 5,
         .token_limit = null,
         .burn_rate_visual = .off,
+        .column_level = .full,
     };
 };
 
@@ -188,7 +192,7 @@ test "CliOptions default has expected values" {
     try std.testing.expectEqual(Command.daily, opts.command);
     try std.testing.expectEqual(@as(?[]const u8, null), opts.since);
     try std.testing.expectEqual(@as(?[]const u8, null), opts.until);
-    try std.testing.expectEqual(true, opts.json);
+    try std.testing.expectEqual(false, opts.json);
     try std.testing.expectEqual(false, opts.breakdown);
     try std.testing.expectEqual(@as(?i32, null), opts.timezone_offset_minutes);
     try std.testing.expectEqual(SortOrder.desc, opts.order);
@@ -199,6 +203,7 @@ test "CliOptions default has expected values" {
     try std.testing.expectEqual(@as(u32, 5), opts.session_length);
     try std.testing.expectEqual(@as(?u64, null), opts.token_limit);
     try std.testing.expectEqual(BurnRateVisual.off, opts.burn_rate_visual);
+    try std.testing.expectEqual(ColumnLevel.full, opts.column_level);
 }
 
 test "Totals struct fields are accessible" {
