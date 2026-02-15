@@ -1,7 +1,8 @@
 // ABOUTME: Serializes aggregated usage data to JSON matching the ccusage output format.
-// ABOUTME: Provides camelCase JSON output for daily, monthly, weekly, and session reports.
+// ABOUTME: Provides camelCase JSON output for daily, monthly, weekly, session, and block reports.
 const std = @import("std");
 const types = @import("types.zig");
+const date = @import("date.zig");
 
 const Writer = std.io.Writer;
 
@@ -201,6 +202,114 @@ pub fn sessionToJson(allocator: std.mem.Allocator, items: []const types.SessionU
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     try writeSessionJson(&aw.writer, items, totals);
+    return aw.toOwnedSlice();
+}
+
+/// Writes an ISO 8601 formatted timestamp string to the writer.
+fn writeTimestamp(w: *Writer, epoch_ms: i64) Writer.Error!void {
+    const buf = date.formatIso8601Output(epoch_ms);
+    try w.writeByte('"');
+    try w.writeAll(&buf);
+    try w.writeByte('"');
+}
+
+/// Writes a single session block item as JSON.
+fn writeBlockItem(w: *Writer, block: types.SessionBlock) Writer.Error!void {
+    try w.writeAll("{\"id\":");
+    try writeJsonString(w, block.id);
+
+    try w.writeAll(",\"startTime\":");
+    try writeTimestamp(w, block.start_time);
+
+    try w.writeAll(",\"endTime\":");
+    try writeTimestamp(w, block.end_time);
+
+    try w.writeAll(",\"actualEndTime\":");
+    if (block.actual_end_time) |aet| {
+        try writeTimestamp(w, aet);
+    } else {
+        try w.writeAll("null");
+    }
+
+    try w.writeAll(",\"isActive\":");
+    try w.writeAll(if (block.is_active) "true" else "false");
+
+    try w.writeAll(",\"isGap\":");
+    try w.writeAll(if (block.is_gap) "true" else "false");
+
+    try w.writeAll(",\"entries\":");
+    try writeJsonInt(w, block.entry_count);
+
+    try w.writeAll(",\"tokenCounts\":{\"inputTokens\":");
+    try writeJsonInt(w, block.input_tokens);
+    try w.writeAll(",\"outputTokens\":");
+    try writeJsonInt(w, block.output_tokens);
+    try w.writeAll(",\"cacheCreationInputTokens\":");
+    try writeJsonInt(w, block.cache_creation_tokens);
+    try w.writeAll(",\"cacheReadInputTokens\":");
+    try writeJsonInt(w, block.cache_read_tokens);
+    try w.writeByte('}');
+
+    try w.writeAll(",\"totalTokens\":");
+    try writeJsonInt(w, block.totalTokens());
+
+    try w.writeAll(",\"costUSD\":");
+    try writeJsonFloat(w, block.cost_usd);
+
+    // models array
+    try w.writeAll(",\"models\":[");
+    for (block.models, 0..) |model, i| {
+        if (i > 0) try w.writeByte(',');
+        try writeJsonString(w, model);
+    }
+    try w.writeByte(']');
+
+    // burnRate (nullable)
+    try w.writeAll(",\"burnRate\":");
+    if (block.burn_rate) |br| {
+        try w.writeAll("{\"tokensPerMinute\":");
+        try writeJsonFloat(w, br.tokens_per_minute);
+        try w.writeAll(",\"costPerHour\":");
+        try writeJsonFloat(w, br.cost_per_hour);
+        try w.writeByte('}');
+    } else {
+        try w.writeAll("null");
+    }
+
+    // projection (nullable)
+    try w.writeAll(",\"projection\":");
+    if (block.projection) |proj| {
+        try w.writeAll("{\"totalTokens\":");
+        try writeJsonInt(w, proj.total_tokens);
+        try w.writeAll(",\"totalCost\":");
+        try writeJsonFloat(w, proj.total_cost);
+        try w.writeAll(",\"remainingMinutes\":");
+        try writeJsonFloat(w, proj.remaining_minutes);
+        try w.writeByte('}');
+    } else {
+        try w.writeAll("null");
+    }
+
+    try w.writeByte('}');
+}
+
+/// Writes a full blocks report as JSON to the given writer.
+pub fn writeBlocksJson(w: *Writer, blocks: []const types.SessionBlock) Writer.Error!void {
+    try w.writeAll("{\"blocks\":[");
+
+    for (blocks, 0..) |block, i| {
+        if (i > 0) try w.writeByte(',');
+        try writeBlockItem(w, block);
+    }
+
+    try w.writeAll("]}");
+}
+
+/// Returns an allocated JSON string for block data.
+pub fn blocksToJson(allocator: std.mem.Allocator, blocks: []const types.SessionBlock) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try writeBlocksJson(&aw.writer, blocks);
     return aw.toOwnedSlice();
 }
 
@@ -635,4 +744,197 @@ test "session JSON with empty sessions array" {
     try testing.expectEqual(@as(i64, 0), tot.get("outputTokens").?.integer);
     try testing.expectEqual(@as(i64, 0), tot.get("totalTokens").?.integer);
     try testing.expectApproxEqAbs(0.0, tot.get("totalCost").?.float, 0.000001);
+}
+
+test "blocks JSON with all fields populated (non-gap, inactive, with burn rate)" {
+    const allocator = testing.allocator;
+
+    const models = [_][]const u8{"claude-sonnet-4-20250514"};
+
+    const blocks = [_]types.SessionBlock{
+        .{
+            .id = "2025-01-15T10:00:00.000Z",
+            .start_time = 1736935200000, // 2025-01-15T10:00:00.000Z
+            .end_time = 1736953200000, // 2025-01-15T15:00:00.000Z
+            .actual_end_time = 1736940600000, // 2025-01-15T11:30:00.000Z
+            .is_active = false,
+            .is_gap = false,
+            .entry_count = 5,
+            .input_tokens = 1000,
+            .output_tokens = 50,
+            .cache_creation_tokens = 100,
+            .cache_read_tokens = 500,
+            .cost_usd = 0.05,
+            .models = &models,
+            .burn_rate = .{ .tokens_per_minute = 18.3, .cost_per_hour = 0.033 },
+            .projection = null,
+        },
+    };
+
+    const json_str = try blocksToJson(allocator, &blocks);
+    defer allocator.free(json_str);
+
+    const parsed = try parseJsonValue(allocator, json_str);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    // Top-level has "blocks" array, no "totals"
+    const blocks_arr = root.get("blocks").?.array;
+    try testing.expectEqual(@as(usize, 1), blocks_arr.items.len);
+    try testing.expectEqual(@as(?std.json.Value, null), root.get("totals"));
+
+    const first = blocks_arr.items[0].object;
+    try testing.expectEqualStrings("2025-01-15T10:00:00.000Z", first.get("id").?.string);
+    try testing.expectEqualStrings("2025-01-15T10:00:00.000Z", first.get("startTime").?.string);
+    try testing.expectEqualStrings("2025-01-15T15:00:00.000Z", first.get("endTime").?.string);
+    try testing.expectEqualStrings("2025-01-15T11:30:00.000Z", first.get("actualEndTime").?.string);
+    try testing.expect(first.get("isActive").?.bool == false);
+    try testing.expect(first.get("isGap").?.bool == false);
+    try testing.expectEqual(@as(i64, 5), first.get("entries").?.integer);
+
+    // tokenCounts sub-object
+    const tc = first.get("tokenCounts").?.object;
+    try testing.expectEqual(@as(i64, 1000), tc.get("inputTokens").?.integer);
+    try testing.expectEqual(@as(i64, 50), tc.get("outputTokens").?.integer);
+    try testing.expectEqual(@as(i64, 100), tc.get("cacheCreationInputTokens").?.integer);
+    try testing.expectEqual(@as(i64, 500), tc.get("cacheReadInputTokens").?.integer);
+
+    try testing.expectEqual(@as(i64, 1650), first.get("totalTokens").?.integer);
+    try testing.expectApproxEqAbs(0.05, first.get("costUSD").?.float, 0.000001);
+
+    // models array
+    const models_arr = first.get("models").?.array;
+    try testing.expectEqual(@as(usize, 1), models_arr.items.len);
+    try testing.expectEqualStrings("claude-sonnet-4-20250514", models_arr.items[0].string);
+
+    // burnRate object
+    const br = first.get("burnRate").?.object;
+    try testing.expectApproxEqAbs(18.3, br.get("tokensPerMinute").?.float, 0.001);
+    try testing.expectApproxEqAbs(0.033, br.get("costPerHour").?.float, 0.000001);
+
+    // projection is null
+    try testing.expect(first.get("projection").? == .null);
+}
+
+test "blocks JSON gap block (null burnRate, null projection, null actualEndTime)" {
+    const allocator = testing.allocator;
+
+    const blocks = [_]types.SessionBlock{
+        .{
+            .id = "2025-01-15T12:00:00.000Z",
+            .start_time = 1736942400000, // 2025-01-15T12:00:00.000Z
+            .end_time = 1736946000000, // 2025-01-15T13:00:00.000Z
+            .actual_end_time = null,
+            .is_active = false,
+            .is_gap = true,
+            .entry_count = 0,
+            .input_tokens = 0,
+            .output_tokens = 0,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .cost_usd = 0.0,
+            .models = &.{},
+            .burn_rate = null,
+            .projection = null,
+        },
+    };
+
+    const json_str = try blocksToJson(allocator, &blocks);
+    defer allocator.free(json_str);
+
+    const parsed = try parseJsonValue(allocator, json_str);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    const blocks_arr = root.get("blocks").?.array;
+    try testing.expectEqual(@as(usize, 1), blocks_arr.items.len);
+
+    const first = blocks_arr.items[0].object;
+    try testing.expect(first.get("isGap").?.bool == true);
+    try testing.expect(first.get("isActive").?.bool == false);
+    try testing.expect(first.get("actualEndTime").? == .null);
+    try testing.expectEqual(@as(i64, 0), first.get("entries").?.integer);
+
+    // burnRate is null
+    try testing.expect(first.get("burnRate").? == .null);
+    // projection is null
+    try testing.expect(first.get("projection").? == .null);
+
+    // models is empty array
+    const models_arr = first.get("models").?.array;
+    try testing.expectEqual(@as(usize, 0), models_arr.items.len);
+}
+
+test "blocks JSON active block with projection" {
+    const allocator = testing.allocator;
+
+    const models = [_][]const u8{ "claude-opus-4", "claude-sonnet-4" };
+
+    const blocks = [_]types.SessionBlock{
+        .{
+            .id = "2025-01-15T14:00:00.000Z",
+            .start_time = 1736949600000, // 2025-01-15T14:00:00.000Z
+            .end_time = 1736967600000, // 2025-01-15T19:00:00.000Z
+            .actual_end_time = 1736953200000, // 2025-01-15T15:00:00.000Z
+            .is_active = true,
+            .is_gap = false,
+            .entry_count = 10,
+            .input_tokens = 5000,
+            .output_tokens = 1000,
+            .cache_creation_tokens = 500,
+            .cache_read_tokens = 2000,
+            .cost_usd = 0.25,
+            .models = &models,
+            .burn_rate = .{ .tokens_per_minute = 141.7, .cost_per_hour = 0.25 },
+            .projection = .{ .total_tokens = 42500, .total_cost = 1.25, .remaining_minutes = 240.0 },
+        },
+    };
+
+    const json_str = try blocksToJson(allocator, &blocks);
+    defer allocator.free(json_str);
+
+    const parsed = try parseJsonValue(allocator, json_str);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    const blocks_arr = root.get("blocks").?.array;
+    const first = blocks_arr.items[0].object;
+    try testing.expect(first.get("isActive").?.bool == true);
+    try testing.expectEqual(@as(i64, 10), first.get("entries").?.integer);
+
+    // models has two entries
+    const models_arr = first.get("models").?.array;
+    try testing.expectEqual(@as(usize, 2), models_arr.items.len);
+    try testing.expectEqualStrings("claude-opus-4", models_arr.items[0].string);
+    try testing.expectEqualStrings("claude-sonnet-4", models_arr.items[1].string);
+
+    // burnRate
+    const br = first.get("burnRate").?.object;
+    try testing.expectApproxEqAbs(141.7, br.get("tokensPerMinute").?.float, 0.1);
+    try testing.expectApproxEqAbs(0.25, br.get("costPerHour").?.float, 0.000001);
+
+    // projection is non-null
+    const proj = first.get("projection").?.object;
+    try testing.expectEqual(@as(i64, 42500), proj.get("totalTokens").?.integer);
+    try testing.expectApproxEqAbs(1.25, proj.get("totalCost").?.float, 0.000001);
+    try testing.expectApproxEqAbs(240.0, proj.get("remainingMinutes").?.float, 0.1);
+}
+
+test "blocks JSON empty blocks array" {
+    const allocator = testing.allocator;
+
+    const blocks = [_]types.SessionBlock{};
+
+    const json_str = try blocksToJson(allocator, &blocks);
+    defer allocator.free(json_str);
+
+    const parsed = try parseJsonValue(allocator, json_str);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    const blocks_arr = root.get("blocks").?.array;
+    try testing.expectEqual(@as(usize, 0), blocks_arr.items.len);
+
+    // No totals key
+    try testing.expectEqual(@as(?std.json.Value, null), root.get("totals"));
 }
