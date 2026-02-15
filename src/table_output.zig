@@ -598,6 +598,92 @@ pub fn writeBlocksTable(
     try table.render(w);
 }
 
+/// Writes project-grouped aggregated tables.
+/// Items are grouped by their .project field. Each group gets a header and its own table.
+/// A grand totals table is printed at the end.
+pub fn writeProjectGroupedTable(
+    w: *Writer,
+    items: []const types.AggregatedUsage,
+    totals: types.Totals,
+    column_level: types.ColumnLevel,
+    period_label: []const u8,
+    breakdown: bool,
+) Writer.Error!void {
+    // Collect unique projects in order of first appearance
+    var seen: [256][]const u8 = undefined;
+    var seen_count: usize = 0;
+
+    for (items) |item| {
+        const proj = item.project orelse continue;
+        var found = false;
+        for (seen[0..seen_count]) |s| {
+            if (std.mem.eql(u8, s, proj)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found and seen_count < 256) {
+            seen[seen_count] = proj;
+            seen_count += 1;
+        }
+    }
+
+    // Render a table per project
+    for (seen[0..seen_count], 0..) |proj, pi| {
+        if (pi > 0) try w.writeByte('\n');
+        try w.print("Project: {s}\n", .{proj});
+
+        // Count items for this project
+        var count: usize = 0;
+        for (items) |item| {
+            const ip = item.project orelse continue;
+            if (std.mem.eql(u8, ip, proj)) count += 1;
+        }
+
+        // Build per-project items slice (using a small inline buffer)
+        var proj_items: [MAX_ROWS]types.AggregatedUsage = undefined;
+        var proj_count: usize = 0;
+        var proj_totals = types.Totals{
+            .input_tokens = 0,
+            .output_tokens = 0,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .total_tokens = 0,
+            .total_cost = 0.0,
+        };
+
+        for (items) |item| {
+            const ip = item.project orelse continue;
+            if (std.mem.eql(u8, ip, proj)) {
+                proj_items[proj_count] = item;
+                proj_count += 1;
+                proj_totals.input_tokens += item.input_tokens;
+                proj_totals.output_tokens += item.output_tokens;
+                proj_totals.cache_creation_tokens += item.cache_creation_tokens;
+                proj_totals.cache_read_tokens += item.cache_read_tokens;
+                proj_totals.total_tokens += item.input_tokens + item.output_tokens +
+                    item.cache_creation_tokens + item.cache_read_tokens;
+                proj_totals.total_cost += item.total_cost;
+            }
+        }
+
+        try writeAggregatedTable(w, proj_items[0..proj_count], proj_totals, column_level, period_label, breakdown);
+    }
+
+    // Grand totals
+    if (seen_count > 1) {
+        try w.writeAll("\nTotals (all projects):\n");
+        var pool = CellPool.init();
+        const grand_cols = [_]Column{
+            .{ .name = "Total", .alignment = .left },
+            .{ .name = "Cost", .alignment = .right },
+        };
+        var grand_table = Table.init(&grand_cols);
+        grand_table.addRow(&.{ "", pool.fmtCurrency(totals.total_cost) });
+        try grand_table.render(w);
+    }
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -1048,4 +1134,49 @@ test "writeBlocksTable: with token limit shows percentage column" {
     try testing.expect(std.mem.indexOf(u8, output, "%") != null);
     // 35000 out of 100000 = 35%
     try testing.expect(std.mem.indexOf(u8, output, "35%") != null);
+}
+
+test "writeProjectGroupedTable: groups by project" {
+    const items = [_]types.AggregatedUsage{
+        .{
+            .period = "2026-02-15",
+            .input_tokens = 100,
+            .output_tokens = 10,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .total_cost = 0.01,
+            .models_used = &.{},
+            .model_breakdowns = &.{},
+            .project = "project-a",
+        },
+        .{
+            .period = "2026-02-15",
+            .input_tokens = 200,
+            .output_tokens = 20,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .total_cost = 0.02,
+            .models_used = &.{},
+            .model_breakdowns = &.{},
+            .project = "project-b",
+        },
+    };
+    const totals = types.Totals{
+        .input_tokens = 300,
+        .output_tokens = 30,
+        .cache_creation_tokens = 0,
+        .cache_read_tokens = 0,
+        .total_tokens = 330,
+        .total_cost = 0.03,
+    };
+
+    const output = try writeToString(writeProjectGroupedTable, .{ &items, totals, .min, "Date", false });
+    defer testing.allocator.free(output);
+
+    // Has project headers
+    try testing.expect(std.mem.indexOf(u8, output, "Project: project-a") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "Project: project-b") != null);
+    // Has grand totals
+    try testing.expect(std.mem.indexOf(u8, output, "Totals (all projects)") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "$0.03") != null);
 }
