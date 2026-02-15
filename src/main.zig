@@ -4,6 +4,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const loader = @import("loader.zig");
 const aggregate = @import("aggregate.zig");
+const date = @import("date.zig");
 const blocks_mod = @import("blocks.zig");
 const json_output = @import("json_output.zig");
 const statusline_mod = @import("statusline.zig");
@@ -28,7 +29,7 @@ const help_text =
     \\  --until YYYYMMDD    End date filter
     \\  --json              JSON output (on by default)
     \\  --breakdown         Per-model cost breakdown
-    \\  --timezone OFFSET   Timezone offset in minutes (e.g., 120 for +02:00)
+    \\  --timezone OFFSET   Timezone offset in minutes (default: system timezone)
     \\  --order asc|desc    Sort order (default: desc)
     \\  --project NAME      Filter to specific project
     \\  --instances         Group by project
@@ -163,6 +164,7 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
+    const tz_offset: i32 = opts.timezone_offset_minutes orelse date.getLocalTimezoneOffset();
     const allocator = std.heap.smp_allocator;
 
     // Statusline reads from stdin, not from usage data files
@@ -186,7 +188,7 @@ pub fn main() !void {
         all_entries,
         opts.since,
         opts.until,
-        opts.timezone_offset_minutes,
+        tz_offset,
     ) catch {
         try stderr_print("Error: failed to filter by date range\n");
         std.process.exit(1);
@@ -213,9 +215,9 @@ pub fn main() !void {
     const json_str: []u8 = switch (opts.command) {
         .daily, .monthly, .weekly => blk: {
             const aggregated = switch (opts.command) {
-                .daily => aggregate.aggregateDaily(allocator, entries, opts.timezone_offset_minutes, opts.instances),
-                .monthly => aggregate.aggregateMonthly(allocator, entries, opts.timezone_offset_minutes, opts.instances),
-                .weekly => aggregate.aggregateWeekly(allocator, entries, opts.timezone_offset_minutes, 0, opts.instances),
+                .daily => aggregate.aggregateDaily(allocator, entries, tz_offset, opts.instances),
+                .monthly => aggregate.aggregateMonthly(allocator, entries, tz_offset, opts.instances),
+                .weekly => aggregate.aggregateWeekly(allocator, entries, tz_offset, 0, opts.instances),
                 else => unreachable,
             } catch {
                 try stderr_print("Error: aggregation failed\n");
@@ -247,7 +249,7 @@ pub fn main() !void {
             break :blk result;
         },
         .session => blk: {
-            const sessions = aggregate.aggregateSession(allocator, entries, opts.timezone_offset_minutes) catch {
+            const sessions = aggregate.aggregateSession(allocator, entries, tz_offset) catch {
                 try stderr_print("Error: session aggregation failed\n");
                 std.process.exit(1);
             };
@@ -345,7 +347,7 @@ test "parseArgs: order flag" {
 
 test "parseArgs: timezone flag" {
     const opts = try parseArgs(&[_][]const u8{ "--timezone", "120" });
-    try std.testing.expectEqual(@as(i32, 120), opts.timezone_offset_minutes);
+    try std.testing.expectEqual(@as(?i32, 120), opts.timezone_offset_minutes);
 }
 
 test "parseArgs: unknown flag returns error" {
@@ -398,7 +400,7 @@ test "parseArgs: recent flag" {
 
 test "parseArgs: negative timezone offset" {
     const opts = try parseArgs(&[_][]const u8{ "--timezone", "-300" });
-    try std.testing.expectEqual(@as(i32, -300), opts.timezone_offset_minutes);
+    try std.testing.expectEqual(@as(?i32, -300), opts.timezone_offset_minutes);
 }
 
 test {

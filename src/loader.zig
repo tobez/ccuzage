@@ -9,6 +9,7 @@ pub fn loadEntriesFromLines(
     lines: []const []const u8,
     session_id: []const u8,
     project: []const u8,
+    shared_seen: ?*std.StringHashMap(void),
 ) ![]types.UsageEntry {
     var result: std.ArrayList(types.UsageEntry) = .{};
     errdefer {
@@ -20,14 +21,18 @@ pub fn loadEntriesFromLines(
         result.deinit(allocator);
     }
 
-    var seen = std.StringHashMap(void).init(allocator);
+    // Use shared dedup map if provided, otherwise create a local one
+    var local_seen = std.StringHashMap(void).init(allocator);
     defer {
-        var it = seen.keyIterator();
-        while (it.next()) |key| {
-            allocator.free(key.*);
+        if (shared_seen == null) {
+            var it = local_seen.keyIterator();
+            while (it.next()) |key| {
+                allocator.free(key.*);
+            }
+            local_seen.deinit();
         }
-        seen.deinit();
     }
+    const seen = shared_seen orelse &local_seen;
 
     for (lines) |line| {
         const entry = parser.parseLine(allocator, line, session_id, project) orelse continue;
@@ -155,7 +160,7 @@ fn collectJsonlFiles(allocator: std.mem.Allocator, dir_path: []const u8, files: 
 }
 
 /// Loads all usage entries from all discovered JSONL files.
-/// Deduplication is per-file (within a session).
+/// Deduplication is global across all files.
 pub fn loadAllEntries(allocator: std.mem.Allocator) ![]types.UsageEntry {
     const file_paths = try discoverJsonlFiles(allocator);
     defer {
@@ -171,6 +176,14 @@ pub fn loadAllEntries(allocator: std.mem.Allocator) ![]types.UsageEntry {
             allocator.free(e.request_id);
         }
         all_entries.deinit(allocator);
+    }
+
+    // Global dedup set shared across all files
+    var seen = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = seen.keyIterator();
+        while (it.next()) |key| allocator.free(key.*);
+        seen.deinit();
     }
 
     for (file_paths) |file_path| {
@@ -192,12 +205,12 @@ pub fn loadAllEntries(allocator: std.mem.Allocator) ![]types.UsageEntry {
             try line_list.append(allocator, line);
         }
 
-        // Parse and dedup within this file
-        const entries = try loadEntriesFromLines(allocator, line_list.items, ps.session_id, ps.project);
+        // Parse and dedup across all files
+        const entries = try loadEntriesFromLines(allocator, line_list.items, ps.session_id, ps.project, &seen);
 
         // Append to combined list
         try all_entries.appendSlice(allocator, entries);
-        allocator.free(entries); // Free the slice wrapper, entries are now in all_entries
+        allocator.free(entries); // Free the temporary slice container (entry data is copied into all_entries)
     }
 
     return all_entries.toOwnedSlice(allocator);
@@ -228,7 +241,7 @@ test "loadEntriesFromLines - no duplicates returns all entries" {
     ;
 
     const lines = &[_][]const u8{ line1, line2, line3 };
-    const entries = try loadEntriesFromLines(std.testing.allocator, lines, "sess-1", "/proj");
+    const entries = try loadEntriesFromLines(std.testing.allocator, lines, "sess-1", "/proj", null);
     defer freeEntries(std.testing.allocator, entries);
 
     try std.testing.expectEqual(@as(usize, 3), entries.len);
@@ -243,7 +256,7 @@ test "loadEntriesFromLines - duplicates are removed" {
     ;
 
     const lines = &[_][]const u8{ line1, line1_dup };
-    const entries = try loadEntriesFromLines(std.testing.allocator, lines, "sess-1", "/proj");
+    const entries = try loadEntriesFromLines(std.testing.allocator, lines, "sess-1", "/proj", null);
     defer freeEntries(std.testing.allocator, entries);
 
     try std.testing.expectEqual(@as(usize, 1), entries.len);
@@ -262,7 +275,7 @@ test "loadEntriesFromLines - mixed duplicates and unique" {
     ;
 
     const lines = &[_][]const u8{ line1, line2, line1_dup };
-    const entries = try loadEntriesFromLines(std.testing.allocator, lines, "sess-1", "/proj");
+    const entries = try loadEntriesFromLines(std.testing.allocator, lines, "sess-1", "/proj", null);
     defer freeEntries(std.testing.allocator, entries);
 
     try std.testing.expectEqual(@as(usize, 2), entries.len);
@@ -278,7 +291,7 @@ test "loadEntriesFromLines - entries without dedup key are always included" {
     ;
 
     const lines = &[_][]const u8{ line_no_id1, line_no_id2 };
-    const entries = try loadEntriesFromLines(std.testing.allocator, lines, "sess-1", "/proj");
+    const entries = try loadEntriesFromLines(std.testing.allocator, lines, "sess-1", "/proj", null);
     defer freeEntries(std.testing.allocator, entries);
 
     // Both should be included even though they share request_id, because message_id is empty
@@ -295,7 +308,7 @@ test "loadEntriesFromLines - invalid lines are skipped" {
     ;
 
     const lines = &[_][]const u8{ valid_line, invalid_line, another_valid };
-    const entries = try loadEntriesFromLines(std.testing.allocator, lines, "sess-1", "/proj");
+    const entries = try loadEntriesFromLines(std.testing.allocator, lines, "sess-1", "/proj", null);
     defer freeEntries(std.testing.allocator, entries);
 
     try std.testing.expectEqual(@as(usize, 2), entries.len);
@@ -303,7 +316,7 @@ test "loadEntriesFromLines - invalid lines are skipped" {
 
 test "loadEntriesFromLines - empty input returns empty result" {
     const lines = &[_][]const u8{};
-    const entries = try loadEntriesFromLines(std.testing.allocator, lines, "sess-1", "/proj");
+    const entries = try loadEntriesFromLines(std.testing.allocator, lines, "sess-1", "/proj", null);
     defer freeEntries(std.testing.allocator, entries);
 
     try std.testing.expectEqual(@as(usize, 0), entries.len);
@@ -333,6 +346,40 @@ test "extractProjectAndSession - no projects in path" {
 test "extractProjectAndSession - path ending at projects/" {
     const result = extractProjectAndSession("/home/.config/claude/projects/");
     try std.testing.expect(result == null);
+}
+
+test "loadEntriesFromLines - cross-file duplicates caught with shared seen map" {
+    const allocator = std.testing.allocator;
+
+    // Same entry appears in two different "files" (line arrays)
+    const shared_line =
+        \\{"timestamp":"2025-01-15T10:00:00.000Z","message":{"usage":{"input_tokens":100,"output_tokens":50},"model":"claude-sonnet-4-20250514","id":"msg-001"},"costUSD":0.01,"requestId":"req-001"}
+    ;
+    const unique_line =
+        \\{"timestamp":"2025-01-15T11:00:00.000Z","message":{"usage":{"input_tokens":200,"output_tokens":100},"model":"claude-sonnet-4-20250514","id":"msg-002"},"costUSD":0.02,"requestId":"req-002"}
+    ;
+
+    var seen = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = seen.keyIterator();
+        while (it.next()) |key| allocator.free(key.*);
+        seen.deinit();
+    }
+
+    // "File 1" has shared_line + unique_line
+    const file1_lines = &[_][]const u8{ shared_line, unique_line };
+    const entries1 = try loadEntriesFromLines(allocator, file1_lines, "sess-1", "/proj", &seen);
+    defer freeEntries(allocator, entries1);
+
+    // "File 2" has the same shared_line (cross-file duplicate)
+    const file2_lines = &[_][]const u8{shared_line};
+    const entries2 = try loadEntriesFromLines(allocator, file2_lines, "sess-1", "/proj", &seen);
+    defer freeEntries(allocator, entries2);
+
+    // File 1 should have both entries
+    try std.testing.expectEqual(@as(usize, 2), entries1.len);
+    // File 2 should have 0 — the duplicate was caught by the shared seen map
+    try std.testing.expectEqual(@as(usize, 0), entries2.len);
 }
 
 test "file reading and parsing integration" {
@@ -381,7 +428,7 @@ test "file reading and parsing integration" {
     try std.testing.expectEqual(@as(usize, 3), line_list.items.len);
 
     // Parse and dedup
-    const entries = try loadEntriesFromLines(allocator, line_list.items, "sess-abc", "testproj");
+    const entries = try loadEntriesFromLines(allocator, line_list.items, "sess-abc", "testproj", null);
     defer freeEntries(allocator, entries);
 
     // Should have 2 entries after dedup (line1 and line2, line1_dup removed)

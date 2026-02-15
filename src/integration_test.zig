@@ -66,10 +66,10 @@ const fixture_lines_beta = &[_][]const u8{
 // =============================================================================
 
 fn loadFixture(allocator: std.mem.Allocator) ![]types.UsageEntry {
-    const alpha = try loader.loadEntriesFromLines(allocator, fixture_lines_alpha, "sess-alpha", "proj-alpha");
+    const alpha = try loader.loadEntriesFromLines(allocator, fixture_lines_alpha, "sess-alpha", "proj-alpha", null);
     errdefer freeEntries(allocator, alpha);
 
-    const beta = try loader.loadEntriesFromLines(allocator, fixture_lines_beta, "sess-beta", "proj-beta");
+    const beta = try loader.loadEntriesFromLines(allocator, fixture_lines_beta, "sess-beta", "proj-beta", null);
     errdefer freeEntries(allocator, beta);
 
     const combined = try allocator.alloc(types.UsageEntry, alpha.len + beta.len);
@@ -410,7 +410,7 @@ test "integration: empty input produces empty JSON for all pipelines" {
 
     // Load from empty lines array
     const empty_lines = &[_][]const u8{};
-    const entries = try loader.loadEntriesFromLines(allocator, empty_lines, "sess-empty", "proj-empty");
+    const entries = try loader.loadEntriesFromLines(allocator, empty_lines, "sess-empty", "proj-empty", null);
     defer allocator.free(entries);
     try std.testing.expectEqual(@as(usize, 0), entries.len);
 
@@ -483,7 +483,7 @@ test "integration: single entry produces correct output across all pipelines" {
 
     // One valid JSONL line: 2025-01-14T10:00:00Z, sonnet, 500/100/50/200, $0.05
     const single_line = &[_][]const u8{line_1};
-    const entries = try loader.loadEntriesFromLines(allocator, single_line, "sess-single", "proj-single");
+    const entries = try loader.loadEntriesFromLines(allocator, single_line, "sess-single", "proj-single", null);
     defer freeEntries(allocator, entries);
     try std.testing.expectEqual(@as(usize, 1), entries.len);
 
@@ -580,7 +580,7 @@ test "integration: zero tokens with nonzero duration produces zero burn rate" {
     ;
 
     const lines = &[_][]const u8{ zero_line_1, zero_line_2 };
-    const entries = try loader.loadEntriesFromLines(allocator, lines, "sess-zero", "proj-zero");
+    const entries = try loader.loadEntriesFromLines(allocator, lines, "sess-zero", "proj-zero", null);
     defer freeEntries(allocator, entries);
     try std.testing.expectEqual(@as(usize, 2), entries.len);
 
@@ -624,7 +624,7 @@ test "integration: single zero-token entry produces null burn rate" {
     ;
 
     const lines = &[_][]const u8{zero_line};
-    const entries = try loader.loadEntriesFromLines(allocator, lines, "sess-z0", "proj-z0");
+    const entries = try loader.loadEntriesFromLines(allocator, lines, "sess-z0", "proj-z0", null);
     defer freeEntries(allocator, entries);
     try std.testing.expectEqual(@as(usize, 1), entries.len);
 
@@ -663,7 +663,7 @@ test "integration: zero-cost entries aggregate correctly" {
     ;
 
     const lines = &[_][]const u8{ nocost_line_1, nocost_line_2 };
-    const entries = try loader.loadEntriesFromLines(allocator, lines, "sess-nc", "proj-nc");
+    const entries = try loader.loadEntriesFromLines(allocator, lines, "sess-nc", "proj-nc", null);
     defer freeEntries(allocator, entries);
     try std.testing.expectEqual(@as(usize, 2), entries.len);
 

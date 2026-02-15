@@ -1,6 +1,7 @@
 // ABOUTME: Date and time utilities for parsing, formatting, and manipulating timestamps.
 // ABOUTME: Handles ISO 8601 parsing, epoch conversion, timezone offsets, and week calculations.
 const std = @import("std");
+const libc = @cImport(@cInclude("time.h"));
 
 pub const ParseError = error{
     InvalidFormat,
@@ -167,6 +168,15 @@ pub fn dailyToFilterDate(daily: *const [10]u8) [8]u8 {
         daily[5], daily[6],
         daily[8], daily[9],
     };
+}
+
+/// Detect the system's local timezone offset in minutes from UTC.
+/// Uses the C library's localtime_r to read the system timezone.
+pub fn getLocalTimezoneOffset() i32 {
+    var now: libc.time_t = @intCast(std.time.timestamp());
+    var tm: libc.struct_tm = undefined;
+    _ = libc.localtime_r(&now, &tm);
+    return @intCast(@divTrunc(tm.tm_gmtoff, 60));
 }
 
 // --- Internal helpers ---
