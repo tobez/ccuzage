@@ -6,6 +6,7 @@ const loader = @import("loader.zig");
 const aggregate = @import("aggregate.zig");
 const blocks_mod = @import("blocks.zig");
 const json_output = @import("json_output.zig");
+const statusline_mod = @import("statusline.zig");
 
 const version = "blazing v0.1.0";
 
@@ -164,6 +165,15 @@ pub fn main() !void {
 
     const allocator = std.heap.smp_allocator;
 
+    // Statusline reads from stdin, not from usage data files
+    if (opts.command == .statusline) {
+        statusline_mod.runStatusline(allocator) catch {
+            try stderr_print("Error: statusline failed\n");
+            std.process.exit(1);
+        };
+        return;
+    }
+
     // Load all entries
     const all_entries = loader.loadAllEntries(allocator) catch {
         try stderr_print("Error: failed to load usage data\n");
@@ -282,10 +292,7 @@ pub fn main() !void {
                 std.process.exit(1);
             };
         },
-        .statusline => {
-            try stderr_print("statusline not yet implemented\n");
-            std.process.exit(1);
-        },
+        .statusline => unreachable, // handled above before entry loading
     };
 
     try stdout.print("{s}\n", .{json_str});
@@ -411,4 +418,5 @@ test {
     _ = @import("aggregate.zig");
     _ = @import("json_output.zig");
     _ = @import("blocks.zig");
+    _ = @import("statusline.zig");
 }
