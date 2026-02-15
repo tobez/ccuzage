@@ -321,28 +321,27 @@ pub fn writeAggregatedTable(
     var table = Table.init(col_def.cols[0..col_def.count]);
     var pool = CellPool.init();
 
-    for (items, 0..) |item, item_idx| {
-        // First row: period, first model with "- " prefix, and numbers
-        const first_model = formatFirstModel(&pool, item.models_used);
-        addAggregatedRow(&table, &pool, column_level, item.period, first_model, item.input_tokens, item.output_tokens, item.cache_creation_tokens, item.cache_read_tokens, item.total_cost);
-
-        // Additional model rows (empty period, empty numbers)
-        if (item.models_used.len > 1) {
-            for (item.models_used[1..]) |model| {
-                const model_str = pool.fmt("- {s}", .{shortenModelName(&pool, model)});
-                addModelContinuationRow(&table, column_level, model_str);
-            }
-        }
-
+    for (items) |item| {
         if (breakdown) {
-            for (item.model_breakdowns) |mb| {
-                const label = pool.fmt("  \xe2\x94\x94\xe2\x94\x80 {s}", .{shortenModelName(&pool, mb.model_name)});
-                addAggregatedRow(&table, &pool, column_level, "", label, mb.input_tokens, mb.output_tokens, mb.cache_creation_tokens, mb.cache_read_tokens, mb.cost);
+            // With breakdown: each model gets its own row with numbers
+            for (item.model_breakdowns, 0..) |mb, mi| {
+                const label = pool.fmt("- {s}", .{shortenModelName(&pool, mb.model_name)});
+                const period = if (mi == 0) item.period else "";
+                addAggregatedRow(&table, &pool, column_level, period, label, mb.input_tokens, mb.output_tokens, mb.cache_creation_tokens, mb.cache_read_tokens, mb.cost);
+            }
+        } else {
+            // Without breakdown: period row with totals, models listed below
+            const first_model = formatFirstModel(&pool, item.models_used);
+            addAggregatedRow(&table, &pool, column_level, item.period, first_model, item.input_tokens, item.output_tokens, item.cache_creation_tokens, item.cache_read_tokens, item.total_cost);
+
+            if (item.models_used.len > 1) {
+                for (item.models_used[1..]) |model| {
+                    const model_str = pool.fmt("- {s}", .{shortenModelName(&pool, model)});
+                    addModelContinuationRow(&table, column_level, model_str);
+                }
             }
         }
 
-        // Separator after each group (including before totals)
-        _ = item_idx;
         table.addSeparator();
     }
 
@@ -439,55 +438,33 @@ pub fn writeSessionTable(
     var pool = CellPool.init();
 
     for (items) |item| {
-        const total = item.input_tokens + item.output_tokens +
-            item.cache_creation_tokens + item.cache_read_tokens;
         const session_str = truncateSessionId(&pool, item.session_id);
-        const models_str = joinModels(&pool, item.models_used);
         const project_str = projectBasename(item.project_path);
 
-        switch (column_level) {
-            .full => table.addRow(&.{
-                session_str,
-                models_str,
-                pool.fmtTokens(item.input_tokens),
-                pool.fmtTokens(item.output_tokens),
-                pool.fmtTokens(item.cache_creation_tokens),
-                pool.fmtTokens(item.cache_read_tokens),
-                pool.fmtTokens(total),
-                pool.fmtCurrency(item.total_cost),
-                project_str,
-                item.last_activity,
-            }),
-            .mid => table.addRow(&.{
-                session_str,
-                models_str,
-                pool.fmtTokens(item.input_tokens),
-                pool.fmtTokens(item.output_tokens),
-                pool.fmtTokens(item.cache_read_tokens),
-                pool.fmtCurrency(item.total_cost),
-                project_str,
-                item.last_activity,
-            }),
-            .min => table.addRow(&.{
-                session_str,
-                models_str,
-                pool.fmtTokens(total),
-                pool.fmtCurrency(item.total_cost),
-                project_str,
-                item.last_activity,
-            }),
-        }
-
         if (breakdown) {
-            for (item.model_breakdowns) |mb| {
+            // With breakdown: each model gets its own row with numbers
+            for (item.model_breakdowns, 0..) |mb, mi| {
                 const mb_total = mb.input_tokens + mb.output_tokens +
                     mb.cache_creation_tokens + mb.cache_read_tokens;
-                const label = pool.fmt("  \xe2\x94\x94\xe2\x94\x80 {s}", .{shortenModelName(&pool, mb.model_name)});
+                const label = pool.fmt("- {s}", .{shortenModelName(&pool, mb.model_name)});
+                const sess = if (mi == 0) session_str else @as([]const u8, "");
+                const proj = if (mi == 0) project_str else @as([]const u8, "");
+                const act = if (mi == 0) item.last_activity else @as([]const u8, "");
                 switch (column_level) {
-                    .full => table.addRow(&.{ label, "", pool.fmtTokens(mb.input_tokens), pool.fmtTokens(mb.output_tokens), pool.fmtTokens(mb.cache_creation_tokens), pool.fmtTokens(mb.cache_read_tokens), pool.fmtTokens(mb_total), pool.fmtCurrency(mb.cost), "", "" }),
-                    .mid => table.addRow(&.{ label, "", pool.fmtTokens(mb.input_tokens), pool.fmtTokens(mb.output_tokens), pool.fmtTokens(mb.cache_read_tokens), pool.fmtCurrency(mb.cost), "", "" }),
-                    .min => table.addRow(&.{ label, "", pool.fmtTokens(mb_total), pool.fmtCurrency(mb.cost), "", "" }),
+                    .full => table.addRow(&.{ sess, label, pool.fmtTokens(mb.input_tokens), pool.fmtTokens(mb.output_tokens), pool.fmtTokens(mb.cache_creation_tokens), pool.fmtTokens(mb.cache_read_tokens), pool.fmtTokens(mb_total), pool.fmtCurrency(mb.cost), proj, act }),
+                    .mid => table.addRow(&.{ sess, label, pool.fmtTokens(mb.input_tokens), pool.fmtTokens(mb.output_tokens), pool.fmtTokens(mb.cache_read_tokens), pool.fmtCurrency(mb.cost), proj, act }),
+                    .min => table.addRow(&.{ sess, label, pool.fmtTokens(mb_total), pool.fmtCurrency(mb.cost), proj, act }),
                 }
+            }
+        } else {
+            // Without breakdown: single row per session with totals
+            const total = item.input_tokens + item.output_tokens +
+                item.cache_creation_tokens + item.cache_read_tokens;
+            const models_str = joinModels(&pool, item.models_used);
+            switch (column_level) {
+                .full => table.addRow(&.{ session_str, models_str, pool.fmtTokens(item.input_tokens), pool.fmtTokens(item.output_tokens), pool.fmtTokens(item.cache_creation_tokens), pool.fmtTokens(item.cache_read_tokens), pool.fmtTokens(total), pool.fmtCurrency(item.total_cost), project_str, item.last_activity }),
+                .mid => table.addRow(&.{ session_str, models_str, pool.fmtTokens(item.input_tokens), pool.fmtTokens(item.output_tokens), pool.fmtTokens(item.cache_read_tokens), pool.fmtCurrency(item.total_cost), project_str, item.last_activity }),
+                .min => table.addRow(&.{ session_str, models_str, pool.fmtTokens(total), pool.fmtCurrency(item.total_cost), project_str, item.last_activity }),
             }
         }
     }
@@ -879,9 +856,12 @@ test "writeAggregatedTable: full columns with breakdown" {
     try testing.expect(std.mem.indexOf(u8, output, "Output") != null);
     try testing.expect(std.mem.indexOf(u8, output, "Cache Create") != null);
     try testing.expect(std.mem.indexOf(u8, output, "Cache Read") != null);
-    // Has breakdown rows with └─ prefix
-    try testing.expect(std.mem.indexOf(u8, output, "\xe2\x94\x94\xe2\x94\x80 opus") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\xe2\x94\x94\xe2\x94\x80 sonnet") != null);
+    // Has breakdown rows with "- " prefix and numbers
+    try testing.expect(std.mem.indexOf(u8, output, "- opus") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "- sonnet") != null);
+    // Breakdown rows have per-model numbers
+    try testing.expect(std.mem.indexOf(u8, output, "700") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "300") != null);
 }
 
 test "writeAggregatedTable: mid columns" {
