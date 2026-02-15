@@ -28,7 +28,8 @@ const help_text =
     \\Options:
     \\  -s, --since YYYYMMDD    Start date filter
     \\  -u, --until YYYYMMDD    End date filter
-    \\  -j, --json              JSON output (on by default)
+    \\  -j, --json              JSON output
+    \\  -c, --columns LEVEL     Column detail: min, mid, full (default: full)
     \\  -b, --breakdown         Per-model cost breakdown
     \\  -z, --timezone OFFSET   Timezone offset in minutes (default: system timezone)
     \\  -o, --order asc|desc    Sort order (default: desc)
@@ -74,6 +75,18 @@ pub fn parseArgs(args: []const []const u8) ParseError!types.CliOptions {
             opts.until = args[i];
         } else if (std.mem.eql(u8, arg, "--json") or std.mem.eql(u8, arg, "-j")) {
             opts.json = true;
+        } else if (std.mem.eql(u8, arg, "--columns") or std.mem.eql(u8, arg, "-c")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            if (std.mem.eql(u8, args[i], "min")) {
+                opts.column_level = .min;
+            } else if (std.mem.eql(u8, args[i], "mid")) {
+                opts.column_level = .mid;
+            } else if (std.mem.eql(u8, args[i], "full")) {
+                opts.column_level = .full;
+            } else {
+                return ParseError.InvalidValue;
+            }
         } else if (std.mem.eql(u8, arg, "--breakdown") or std.mem.eql(u8, arg, "-b")) {
             opts.breakdown = true;
         } else if (std.mem.eql(u8, arg, "--timezone") or std.mem.eql(u8, arg, "-z")) {
@@ -478,6 +491,36 @@ test "parseArgs: short flag -p for --project" {
 test "parseArgs: short flag -i for --instances" {
     const opts = try parseArgs(&[_][]const u8{"-i"});
     try std.testing.expectEqual(true, opts.instances);
+}
+
+test "parseArgs: --columns min" {
+    const opts = try parseArgs(&[_][]const u8{ "--columns", "min" });
+    try std.testing.expectEqual(types.ColumnLevel.min, opts.column_level);
+}
+
+test "parseArgs: -c mid" {
+    const opts = try parseArgs(&[_][]const u8{ "-c", "mid" });
+    try std.testing.expectEqual(types.ColumnLevel.mid, opts.column_level);
+}
+
+test "parseArgs: --columns full" {
+    const opts = try parseArgs(&[_][]const u8{ "--columns", "full" });
+    try std.testing.expectEqual(types.ColumnLevel.full, opts.column_level);
+}
+
+test "parseArgs: --columns invalid value returns error" {
+    const result = parseArgs(&[_][]const u8{ "--columns", "huge" });
+    try std.testing.expectError(ParseError.InvalidValue, result);
+}
+
+test "parseArgs: -c missing value returns error" {
+    const result = parseArgs(&[_][]const u8{"-c"});
+    try std.testing.expectError(ParseError.MissingValue, result);
+}
+
+test "parseArgs: default column_level is full" {
+    const opts = try parseArgs(&[_][]const u8{});
+    try std.testing.expectEqual(types.ColumnLevel.full, opts.column_level);
 }
 
 test "parseArgs: mixed short and long flags" {
