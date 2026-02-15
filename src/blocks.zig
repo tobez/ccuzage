@@ -85,6 +85,39 @@ pub fn freeBlock(allocator: std.mem.Allocator, block: *types.SessionBlock) void 
     }
 }
 
+/// Returns a new slice containing only blocks where is_active is true.
+/// Caller owns the returned slice (but not the block contents, which are borrowed).
+pub fn filterActive(allocator: std.mem.Allocator, blocks_slice: []const types.SessionBlock) ![]const types.SessionBlock {
+    var list: std.ArrayList(types.SessionBlock) = .{};
+    errdefer list.deinit(allocator);
+
+    for (blocks_slice) |block| {
+        if (block.is_active) {
+            try list.append(allocator, block);
+        }
+    }
+
+    return try list.toOwnedSlice(allocator);
+}
+
+/// Returns a new slice containing blocks that started within the last `days` days,
+/// or that are currently active.
+/// Caller owns the returned slice (but not the block contents, which are borrowed).
+pub fn filterRecent(allocator: std.mem.Allocator, blocks_slice: []const types.SessionBlock, now_ms: i64, days: u32) ![]const types.SessionBlock {
+    const cutoff = now_ms - @as(i64, days) * 24 * 60 * 60 * 1000;
+
+    var list: std.ArrayList(types.SessionBlock) = .{};
+    errdefer list.deinit(allocator);
+
+    for (blocks_slice) |block| {
+        if (block.start_time >= cutoff or block.is_active) {
+            try list.append(allocator, block);
+        }
+    }
+
+    return try list.toOwnedSlice(allocator);
+}
+
 /// Free a slice of SessionBlocks and all their internal allocations.
 pub fn freeBlocks(allocator: std.mem.Allocator, blocks: []types.SessionBlock) void {
     for (blocks) |*block| freeBlock(allocator, block);
@@ -503,4 +536,211 @@ test "gap block has null burn rate and projection" {
         }
     }
     try std.testing.expect(gap_found);
+}
+
+test "filterActive - returns only active blocks" {
+    const allocator = std.testing.allocator;
+
+    // 3 blocks: 1 active, 2 inactive
+    const blocks_input = [_]types.SessionBlock{
+        .{
+            .id = "block-1",
+            .start_time = hhmm(2, 0),
+            .end_time = hhmm(7, 0),
+            .actual_end_time = hhmm(3, 0),
+            .is_active = false,
+            .is_gap = false,
+            .entry_count = 1,
+            .input_tokens = 100,
+            .output_tokens = 50,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .cost_usd = 0.10,
+            .models = &.{},
+            .burn_rate = null,
+            .projection = null,
+        },
+        .{
+            .id = "block-2",
+            .start_time = hhmm(10, 0),
+            .end_time = hhmm(15, 0),
+            .actual_end_time = hhmm(12, 0),
+            .is_active = true,
+            .is_gap = false,
+            .entry_count = 3,
+            .input_tokens = 500,
+            .output_tokens = 200,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .cost_usd = 0.50,
+            .models = &.{},
+            .burn_rate = null,
+            .projection = null,
+        },
+        .{
+            .id = "block-3",
+            .start_time = hhmm(18, 0),
+            .end_time = hhmm(23, 0),
+            .actual_end_time = hhmm(20, 0),
+            .is_active = false,
+            .is_gap = false,
+            .entry_count = 2,
+            .input_tokens = 200,
+            .output_tokens = 100,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .cost_usd = 0.20,
+            .models = &.{},
+            .burn_rate = null,
+            .projection = null,
+        },
+    };
+
+    const result = try filterActive(allocator, &blocks_input);
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+    try std.testing.expectEqualStrings("block-2", result[0].id);
+    try std.testing.expectEqual(true, result[0].is_active);
+}
+
+test "filterActive - no active blocks returns empty" {
+    const allocator = std.testing.allocator;
+
+    const blocks_input = [_]types.SessionBlock{
+        .{
+            .id = "block-1",
+            .start_time = hhmm(2, 0),
+            .end_time = hhmm(7, 0),
+            .actual_end_time = hhmm(3, 0),
+            .is_active = false,
+            .is_gap = false,
+            .entry_count = 1,
+            .input_tokens = 100,
+            .output_tokens = 50,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .cost_usd = 0.10,
+            .models = &.{},
+            .burn_rate = null,
+            .projection = null,
+        },
+        .{
+            .id = "block-2",
+            .start_time = hhmm(10, 0),
+            .end_time = hhmm(15, 0),
+            .actual_end_time = hhmm(12, 0),
+            .is_active = false,
+            .is_gap = false,
+            .entry_count = 2,
+            .input_tokens = 200,
+            .output_tokens = 100,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .cost_usd = 0.20,
+            .models = &.{},
+            .burn_rate = null,
+            .projection = null,
+        },
+    };
+
+    const result = try filterActive(allocator, &blocks_input);
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "filterRecent - keeps recent and active blocks" {
+    const allocator = std.testing.allocator;
+
+    // "now" is 2025-01-15T12:00, 3-day cutoff means 2025-01-12T12:00
+    const now = hhmm(12, 0); // 2025-01-15T12:00
+    const day_ms: i64 = 24 * 60 * 60 * 1000;
+
+    const blocks_input = [_]types.SessionBlock{
+        // 7 days ago - should be filtered out (inactive + old)
+        .{
+            .id = "old-block",
+            .start_time = now - 7 * day_ms,
+            .end_time = now - 7 * day_ms + 5 * 3600000,
+            .actual_end_time = now - 7 * day_ms + 3600000,
+            .is_active = false,
+            .is_gap = false,
+            .entry_count = 1,
+            .input_tokens = 100,
+            .output_tokens = 50,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .cost_usd = 0.10,
+            .models = &.{},
+            .burn_rate = null,
+            .projection = null,
+        },
+        // 5 days ago, but active - should be kept
+        .{
+            .id = "old-active-block",
+            .start_time = now - 5 * day_ms,
+            .end_time = now - 5 * day_ms + 5 * 3600000,
+            .actual_end_time = now - 5 * day_ms + 3600000,
+            .is_active = true,
+            .is_gap = false,
+            .entry_count = 2,
+            .input_tokens = 200,
+            .output_tokens = 100,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .cost_usd = 0.20,
+            .models = &.{},
+            .burn_rate = null,
+            .projection = null,
+        },
+        // 2 days ago - recent, should be kept
+        .{
+            .id = "recent-block",
+            .start_time = now - 2 * day_ms,
+            .end_time = now - 2 * day_ms + 5 * 3600000,
+            .actual_end_time = now - 2 * day_ms + 3600000,
+            .is_active = false,
+            .is_gap = false,
+            .entry_count = 3,
+            .input_tokens = 300,
+            .output_tokens = 150,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .cost_usd = 0.30,
+            .models = &.{},
+            .burn_rate = null,
+            .projection = null,
+        },
+        // 1 day ago - recent, should be kept
+        .{
+            .id = "yesterday-block",
+            .start_time = now - 1 * day_ms,
+            .end_time = now - 1 * day_ms + 5 * 3600000,
+            .actual_end_time = now - 1 * day_ms + 3600000,
+            .is_active = false,
+            .is_gap = false,
+            .entry_count = 4,
+            .input_tokens = 400,
+            .output_tokens = 200,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .cost_usd = 0.40,
+            .models = &.{},
+            .burn_rate = null,
+            .projection = null,
+        },
+    };
+
+    const result = try filterRecent(allocator, &blocks_input, now, 3);
+    defer allocator.free(result);
+
+    // Should keep: old-active-block (active), recent-block (2d ago), yesterday-block (1d ago)
+    // Should drop: old-block (7d ago, inactive)
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+
+    // Verify correct blocks are present (order preserved from input)
+    try std.testing.expectEqualStrings("old-active-block", result[0].id);
+    try std.testing.expectEqualStrings("recent-block", result[1].id);
+    try std.testing.expectEqualStrings("yesterday-block", result[2].id);
 }
