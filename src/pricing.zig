@@ -163,6 +163,50 @@ pub fn parseLiteLLMJson(allocator: std.mem.Allocator, json: []const u8) ![]Dynam
     return entries.toOwnedSlice(allocator);
 }
 
+const litellm_url = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+const cache_filename = "litellm_prices.json";
+const cache_max_age_ns: i128 = 3600 * std.time.ns_per_s; // 1 hour
+
+/// Returns the cache directory path: $XDG_CACHE_HOME/blazing or ~/.cache/blazing.
+/// Caller owns the returned memory.
+fn getCacheDir(allocator: std.mem.Allocator) ![]const u8 {
+    const cache_home = std.process.getEnvVarOwned(allocator, "XDG_CACHE_HOME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => blk: {
+            const home = try std.process.getEnvVarOwned(allocator, "HOME");
+            defer allocator.free(home);
+            break :blk try std.fs.path.join(allocator, &.{ home, ".cache" });
+        },
+        else => return err,
+    };
+    defer allocator.free(cache_home);
+    return std.fs.path.join(allocator, &.{ cache_home, "blazing" });
+}
+
+/// Check whether the cache file is fresh (mtime < 1 hour ago).
+fn isCacheFresh(cache_path: []const u8) bool {
+    const file = std.fs.openFileAbsolute(cache_path, .{}) catch return false;
+    defer file.close();
+    const stat = file.stat() catch return false;
+    const now = std.time.nanoTimestamp();
+    return (now - stat.mtime) < cache_max_age_ns;
+}
+
+/// Fetch URL to cache path using curl.
+fn fetchToCache(allocator: std.mem.Allocator, cache_path: []const u8) !void {
+    const argv = [_][]const u8{ "curl", "-sf", "-m", "10", litellm_url, "-o", cache_path };
+    var child = std.process.Child.init(&argv, allocator);
+    child.stderr_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    try child.spawn();
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) return error.FetchFailed;
+        },
+        else => return error.FetchFailed,
+    }
+}
+
 /// Look up pricing for a model name. Returns null for unknown models.
 pub fn lookupModel(model_name: []const u8) ?ModelPricing {
     for (&pricing_table) |*entry| {
@@ -415,6 +459,31 @@ test "parseLiteLLMJson: invalid JSON returns error" {
 test "parseLiteLLMJson: empty input returns error" {
     const result = parseLiteLLMJson(std.testing.allocator, "");
     try std.testing.expectError(error.InvalidJson, result);
+}
+
+// =============================================================================
+// Cache management tests
+// =============================================================================
+
+test "getCacheDir: returns valid path ending in blazing" {
+    const dir = try getCacheDir(std.testing.allocator);
+    defer std.testing.allocator.free(dir);
+    try std.testing.expect(std.mem.endsWith(u8, dir, "/blazing"));
+    try std.testing.expect(dir.len > "/blazing".len);
+}
+
+test "isCacheFresh: fresh file returns true" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile("test_cache.json", .{});
+    file.close();
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "test_cache.json");
+    defer std.testing.allocator.free(path);
+    try std.testing.expect(isCacheFresh(path));
+}
+
+test "isCacheFresh: missing file returns false" {
+    try std.testing.expect(!isCacheFresh("/nonexistent/path/to/file.json"));
 }
 
 test "isClaudeKey: identifies Claude model keys" {
