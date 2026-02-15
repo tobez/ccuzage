@@ -76,7 +76,7 @@ fn loadFixture(allocator: std.mem.Allocator) ![]types.UsageEntry {
     @memcpy(combined[0..alpha.len], alpha);
     @memcpy(combined[alpha.len..], beta);
 
-    // Free the slice wrappers (entries are now in combined)
+    // Free the temporary slice containers (entry data is copied into combined)
     allocator.free(alpha);
     allocator.free(beta);
 
