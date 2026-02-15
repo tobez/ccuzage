@@ -8,6 +8,7 @@ const date = @import("date.zig");
 const blocks_mod = @import("blocks.zig");
 const json_output = @import("json_output.zig");
 const statusline_mod = @import("statusline.zig");
+const pricing = @import("pricing.zig");
 
 const version = "blazing v0.1.0";
 
@@ -166,6 +167,8 @@ pub fn main() !void {
 
     const tz_offset: i32 = opts.timezone_offset_minutes orelse date.getLocalTimezoneOffset();
     const allocator = std.heap.smp_allocator;
+
+    pricing.initDynamic(allocator);
 
     // Statusline reads from stdin, not from usage data files
     if (opts.command == .statusline) {
