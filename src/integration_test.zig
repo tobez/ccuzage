@@ -400,3 +400,316 @@ test "integration: blocks pipeline produces valid JSON structure" {
     // Total input tokens across non-gap blocks should equal 4200
     try std.testing.expectEqual(@as(i64, 4200), total_input);
 }
+
+// =============================================================================
+// Test 7: Empty input full pipeline
+// =============================================================================
+
+test "integration: empty input produces empty JSON for all pipelines" {
+    const allocator = std.testing.allocator;
+
+    // Load from empty lines array
+    const empty_lines = &[_][]const u8{};
+    const entries = try loader.loadEntriesFromLines(allocator, empty_lines, "sess-empty", "proj-empty");
+    defer allocator.free(entries);
+    try std.testing.expectEqual(@as(usize, 0), entries.len);
+
+    // Daily pipeline
+    {
+        const daily = try aggregate.aggregateDaily(allocator, entries, 0, false);
+        defer allocator.free(daily);
+        try std.testing.expectEqual(@as(usize, 0), daily.len);
+
+        const totals = aggregate.calculateTotals(daily);
+        try std.testing.expectEqual(@as(u64, 0), totals.input_tokens);
+        try std.testing.expectEqual(@as(u64, 0), totals.output_tokens);
+        try std.testing.expectEqual(@as(u64, 0), totals.total_tokens);
+        try std.testing.expectApproxEqAbs(@as(f64, 0.0), totals.total_cost, 0.001);
+
+        const json_str = try json_output.reportToJson(allocator, "daily", "date", daily, totals);
+        defer allocator.free(json_str);
+
+        const parsed = try parseJsonValue(allocator, json_str);
+        defer parsed.deinit();
+        const root = parsed.value.object;
+
+        try std.testing.expectEqual(@as(usize, 0), root.get("daily").?.array.items.len);
+        try std.testing.expectEqual(@as(i64, 0), root.get("totals").?.object.get("totalTokens").?.integer);
+    }
+
+    // Session pipeline
+    {
+        const sessions = try aggregate.aggregateSession(allocator, entries, 0);
+        defer allocator.free(sessions);
+        try std.testing.expectEqual(@as(usize, 0), sessions.len);
+
+        const totals = aggregate.calculateSessionTotals(sessions);
+
+        const json_str = try json_output.sessionToJson(allocator, sessions, totals);
+        defer allocator.free(json_str);
+
+        const parsed = try parseJsonValue(allocator, json_str);
+        defer parsed.deinit();
+        const root = parsed.value.object;
+
+        try std.testing.expectEqual(@as(usize, 0), root.get("sessions").?.array.items.len);
+        try std.testing.expectEqual(@as(i64, 0), root.get("totals").?.object.get("totalTokens").?.integer);
+    }
+
+    // Blocks pipeline
+    {
+        const blks = try blocks_mod.identifyBlocks(allocator, entries, 5, 2000000000000);
+        // Empty input returns a comptime empty slice, no need to free
+        try std.testing.expectEqual(@as(usize, 0), blks.len);
+
+        const json_str = try json_output.blocksToJson(allocator, blks);
+        defer allocator.free(json_str);
+
+        const parsed = try parseJsonValue(allocator, json_str);
+        defer parsed.deinit();
+        const root = parsed.value.object;
+
+        try std.testing.expectEqual(@as(usize, 0), root.get("blocks").?.array.items.len);
+        try std.testing.expectEqual(@as(?std.json.Value, null), root.get("totals"));
+    }
+}
+
+// =============================================================================
+// Test 8: Single entry full pipeline
+// =============================================================================
+
+test "integration: single entry produces correct output across all pipelines" {
+    const allocator = std.testing.allocator;
+
+    // One valid JSONL line: 2025-01-14T10:00:00Z, sonnet, 500/100/50/200, $0.05
+    const single_line = &[_][]const u8{line_1};
+    const entries = try loader.loadEntriesFromLines(allocator, single_line, "sess-single", "proj-single");
+    defer freeEntries(allocator, entries);
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+
+    // Daily pipeline: 1 day with correct values
+    {
+        const daily = try aggregate.aggregateDaily(allocator, entries, 0, false);
+        defer freeAggregated(allocator, daily);
+        try std.testing.expectEqual(@as(usize, 1), daily.len);
+
+        aggregate.sortAggregated(daily, .asc);
+        try std.testing.expectEqualStrings("2025-01-14", daily[0].period);
+        try std.testing.expectEqual(@as(u64, 500), daily[0].input_tokens);
+        try std.testing.expectEqual(@as(u64, 100), daily[0].output_tokens);
+        try std.testing.expectEqual(@as(u64, 50), daily[0].cache_creation_tokens);
+        try std.testing.expectEqual(@as(u64, 200), daily[0].cache_read_tokens);
+        try std.testing.expectApproxEqAbs(@as(f64, 0.05), daily[0].total_cost, 0.001);
+
+        const totals = aggregate.calculateTotals(daily);
+        try std.testing.expectEqual(@as(u64, 850), totals.total_tokens);
+
+        const json_str = try json_output.reportToJson(allocator, "daily", "date", daily, totals);
+        defer allocator.free(json_str);
+
+        const parsed = try parseJsonValue(allocator, json_str);
+        defer parsed.deinit();
+        const root = parsed.value.object;
+
+        try std.testing.expectEqual(@as(usize, 1), root.get("daily").?.array.items.len);
+        try std.testing.expectApproxEqAbs(@as(f64, 0.05), root.get("totals").?.object.get("totalCost").?.float, 0.001);
+    }
+
+    // Session pipeline: 1 session
+    {
+        const sessions = try aggregate.aggregateSession(allocator, entries, 0);
+        defer freeSessionUsage(allocator, sessions);
+        try std.testing.expectEqual(@as(usize, 1), sessions.len);
+        try std.testing.expectEqualStrings("sess-single", sessions[0].session_id);
+        try std.testing.expectEqualStrings("proj-single", sessions[0].project_path);
+
+        const totals = aggregate.calculateSessionTotals(sessions);
+
+        const json_str = try json_output.sessionToJson(allocator, sessions, totals);
+        defer allocator.free(json_str);
+
+        const parsed = try parseJsonValue(allocator, json_str);
+        defer parsed.deinit();
+        const root = parsed.value.object;
+
+        try std.testing.expectEqual(@as(usize, 1), root.get("sessions").?.array.items.len);
+    }
+
+    // Blocks pipeline: 1 block, not active (now far in future)
+    {
+        const far_future: i64 = 2000000000000;
+        const blks = try blocks_mod.identifyBlocks(allocator, entries, 5, far_future);
+        defer blocks_mod.freeBlocks(allocator, blks);
+
+        // Single entry => 1 data block, no gaps
+        try std.testing.expectEqual(@as(usize, 1), blks.len);
+        try std.testing.expectEqual(false, blks[0].is_gap);
+        try std.testing.expectEqual(false, blks[0].is_active);
+        try std.testing.expectEqual(@as(u32, 1), blks[0].entry_count);
+        // Single entry => duration = 0 => burn_rate should be null
+        try std.testing.expectEqual(@as(?types.BurnRate, null), blks[0].burn_rate);
+
+        const json_str = try json_output.blocksToJson(allocator, blks);
+        defer allocator.free(json_str);
+
+        const parsed = try parseJsonValue(allocator, json_str);
+        defer parsed.deinit();
+        const root = parsed.value.object;
+
+        const blocks_arr = root.get("blocks").?.array;
+        try std.testing.expectEqual(@as(usize, 1), blocks_arr.items.len);
+        // burn_rate is null in JSON
+        try std.testing.expect(blocks_arr.items[0].object.get("burnRate").? == .null);
+    }
+}
+
+// =============================================================================
+// Test 9: All-zero tokens through blocks pipeline
+// =============================================================================
+
+test "integration: zero tokens with nonzero duration produces zero burn rate" {
+    const allocator = std.testing.allocator;
+
+    // Two entries with all-zero tokens but different timestamps (nonzero duration)
+    // The parser defaults missing token fields to 0, so we craft lines with explicit 0s
+    const zero_line_1 =
+        \\{"timestamp":"2025-01-15T10:00:00.000Z","message":{"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"model":"claude-sonnet-4-20250514","id":"msg-z1"},"costUSD":0.0,"requestId":"req-z1"}
+    ;
+    const zero_line_2 =
+        \\{"timestamp":"2025-01-15T10:30:00.000Z","message":{"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"model":"claude-sonnet-4-20250514","id":"msg-z2"},"costUSD":0.0,"requestId":"req-z2"}
+    ;
+
+    const lines = &[_][]const u8{ zero_line_1, zero_line_2 };
+    const entries = try loader.loadEntriesFromLines(allocator, lines, "sess-zero", "proj-zero");
+    defer freeEntries(allocator, entries);
+    try std.testing.expectEqual(@as(usize, 2), entries.len);
+
+    // Blocks pipeline: 2 entries 30 min apart => 1 block with nonzero duration
+    const far_future: i64 = 2000000000000;
+    const blks = try blocks_mod.identifyBlocks(allocator, entries, 5, far_future);
+    defer blocks_mod.freeBlocks(allocator, blks);
+
+    try std.testing.expectEqual(@as(usize, 1), blks.len);
+    try std.testing.expectEqual(false, blks[0].is_gap);
+    try std.testing.expectEqual(@as(u32, 2), blks[0].entry_count);
+    try std.testing.expectEqual(@as(u64, 0), blks[0].totalTokens());
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), blks[0].cost_usd, 0.001);
+
+    // burn_rate should exist (duration > 0) but tokens_per_minute = 0.0
+    const br = blks[0].burn_rate orelse return error.TestUnexpectedResult;
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), br.tokens_per_minute, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), br.cost_per_hour, 0.001);
+
+    // Verify JSON output doesn't panic
+    const json_str = try json_output.blocksToJson(allocator, blks);
+    defer allocator.free(json_str);
+
+    const parsed = try parseJsonValue(allocator, json_str);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    const block_obj = root.get("blocks").?.array.items[0].object;
+    const br_json = block_obj.get("burnRate").?.object;
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), br_json.get("tokensPerMinute").?.float, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), br_json.get("costPerHour").?.float, 0.001);
+}
+
+test "integration: single zero-token entry produces null burn rate" {
+    const allocator = std.testing.allocator;
+
+    // Single entry with all-zero tokens => duration = 0 => burn_rate = null
+    const zero_line =
+        \\{"timestamp":"2025-01-15T10:00:00.000Z","message":{"usage":{"input_tokens":0,"output_tokens":0},"model":"claude-sonnet-4-20250514","id":"msg-z0"},"costUSD":0.0,"requestId":"req-z0"}
+    ;
+
+    const lines = &[_][]const u8{zero_line};
+    const entries = try loader.loadEntriesFromLines(allocator, lines, "sess-z0", "proj-z0");
+    defer freeEntries(allocator, entries);
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+
+    const far_future: i64 = 2000000000000;
+    const blks = try blocks_mod.identifyBlocks(allocator, entries, 5, far_future);
+    defer blocks_mod.freeBlocks(allocator, blks);
+
+    try std.testing.expectEqual(@as(usize, 1), blks.len);
+    try std.testing.expectEqual(@as(u64, 0), blks[0].totalTokens());
+    try std.testing.expectEqual(@as(?types.BurnRate, null), blks[0].burn_rate);
+    try std.testing.expectEqual(@as(?types.Projection, null), blks[0].projection);
+
+    // JSON: burnRate should be null
+    const json_str = try json_output.blocksToJson(allocator, blks);
+    defer allocator.free(json_str);
+
+    const parsed = try parseJsonValue(allocator, json_str);
+    defer parsed.deinit();
+    const block_obj = parsed.value.object.get("blocks").?.array.items[0].object;
+    try std.testing.expect(block_obj.get("burnRate").? == .null);
+}
+
+// =============================================================================
+// Test 10: Zero-cost entries through all pipelines
+// =============================================================================
+
+test "integration: zero-cost entries aggregate correctly" {
+    const allocator = std.testing.allocator;
+
+    // Entries with tokens but zero cost (costUSD missing => defaults to 0.0)
+    const nocost_line_1 =
+        \\{"timestamp":"2025-01-15T10:00:00.000Z","message":{"usage":{"input_tokens":100,"output_tokens":50},"model":"claude-sonnet-4-20250514","id":"msg-nc1"},"requestId":"req-nc1"}
+    ;
+    const nocost_line_2 =
+        \\{"timestamp":"2025-01-15T11:00:00.000Z","message":{"usage":{"input_tokens":200,"output_tokens":100},"model":"claude-sonnet-4-20250514","id":"msg-nc2"},"costUSD":0.0,"requestId":"req-nc2"}
+    ;
+
+    const lines = &[_][]const u8{ nocost_line_1, nocost_line_2 };
+    const entries = try loader.loadEntriesFromLines(allocator, lines, "sess-nc", "proj-nc");
+    defer freeEntries(allocator, entries);
+    try std.testing.expectEqual(@as(usize, 2), entries.len);
+
+    // Daily aggregation: tokens sum correctly, cost is 0
+    {
+        const daily = try aggregate.aggregateDaily(allocator, entries, 0, false);
+        defer freeAggregated(allocator, daily);
+        try std.testing.expectEqual(@as(usize, 1), daily.len);
+        try std.testing.expectEqual(@as(u64, 300), daily[0].input_tokens);
+        try std.testing.expectEqual(@as(u64, 150), daily[0].output_tokens);
+        try std.testing.expectApproxEqAbs(@as(f64, 0.0), daily[0].total_cost, 0.001);
+
+        const totals = aggregate.calculateTotals(daily);
+        try std.testing.expectApproxEqAbs(@as(f64, 0.0), totals.total_cost, 0.001);
+        try std.testing.expectEqual(@as(u64, 450), totals.total_tokens);
+
+        const json_str = try json_output.reportToJson(allocator, "daily", "date", daily, totals);
+        defer allocator.free(json_str);
+
+        const parsed = try parseJsonValue(allocator, json_str);
+        defer parsed.deinit();
+        const tot = parsed.value.object.get("totals").?.object;
+        try std.testing.expectApproxEqAbs(@as(f64, 0.0), tot.get("totalCost").?.float, 0.001);
+    }
+
+    // Blocks pipeline: zero cost with nonzero duration => cost_per_hour = 0.0
+    {
+        const far_future: i64 = 2000000000000;
+        const blks = try blocks_mod.identifyBlocks(allocator, entries, 5, far_future);
+        defer blocks_mod.freeBlocks(allocator, blks);
+
+        try std.testing.expectEqual(@as(usize, 1), blks.len);
+        try std.testing.expectApproxEqAbs(@as(f64, 0.0), blks[0].cost_usd, 0.001);
+
+        const br = blks[0].burn_rate orelse return error.TestUnexpectedResult;
+        // tokens_per_minute should be nonzero (450 tokens / 60 min = 7.5)
+        try std.testing.expect(br.tokens_per_minute > 0.0);
+        // cost_per_hour should be 0
+        try std.testing.expectApproxEqAbs(@as(f64, 0.0), br.cost_per_hour, 0.001);
+
+        const json_str = try json_output.blocksToJson(allocator, blks);
+        defer allocator.free(json_str);
+
+        const parsed = try parseJsonValue(allocator, json_str);
+        defer parsed.deinit();
+        const br_json = parsed.value.object.get("blocks").?.array.items[0].object.get("burnRate").?.object;
+        try std.testing.expect(br_json.get("tokensPerMinute").?.float > 0.0);
+        try std.testing.expectApproxEqAbs(@as(f64, 0.0), br_json.get("costPerHour").?.float, 0.001);
+    }
+}
