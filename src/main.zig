@@ -25,14 +25,14 @@ const help_text =
     \\  statusline Real-time usage for Claude Code status bar
     \\
     \\Options:
-    \\  --since YYYYMMDD    Start date filter
-    \\  --until YYYYMMDD    End date filter
-    \\  --json              JSON output (on by default)
-    \\  --breakdown         Per-model cost breakdown
-    \\  --timezone OFFSET   Timezone offset in minutes (default: system timezone)
-    \\  --order asc|desc    Sort order (default: desc)
-    \\  --project NAME      Filter to specific project
-    \\  --instances         Group by project
+    \\  -s, --since YYYYMMDD    Start date filter
+    \\  -u, --until YYYYMMDD    End date filter
+    \\  -j, --json              JSON output (on by default)
+    \\  -b, --breakdown         Per-model cost breakdown
+    \\  -z, --timezone OFFSET   Timezone offset in minutes (default: system timezone)
+    \\  -o, --order asc|desc    Sort order (default: desc)
+    \\  -p, --project NAME      Filter to specific project
+    \\  -i, --instances         Group by project
     \\
     \\Blocks-specific:
     \\  --active            Show only current active block
@@ -60,23 +60,23 @@ pub fn parseArgs(args: []const []const u8) ParseError!types.CliOptions {
     while (i < args.len) {
         const arg = args[i];
 
-        if (std.mem.eql(u8, arg, "--since")) {
+        if (std.mem.eql(u8, arg, "--since") or std.mem.eql(u8, arg, "-s")) {
             i += 1;
             if (i >= args.len) return ParseError.MissingValue;
             opts.since = args[i];
-        } else if (std.mem.eql(u8, arg, "--until")) {
+        } else if (std.mem.eql(u8, arg, "--until") or std.mem.eql(u8, arg, "-u")) {
             i += 1;
             if (i >= args.len) return ParseError.MissingValue;
             opts.until = args[i];
-        } else if (std.mem.eql(u8, arg, "--json")) {
+        } else if (std.mem.eql(u8, arg, "--json") or std.mem.eql(u8, arg, "-j")) {
             opts.json = true;
-        } else if (std.mem.eql(u8, arg, "--breakdown")) {
+        } else if (std.mem.eql(u8, arg, "--breakdown") or std.mem.eql(u8, arg, "-b")) {
             opts.breakdown = true;
-        } else if (std.mem.eql(u8, arg, "--timezone")) {
+        } else if (std.mem.eql(u8, arg, "--timezone") or std.mem.eql(u8, arg, "-z")) {
             i += 1;
             if (i >= args.len) return ParseError.MissingValue;
             opts.timezone_offset_minutes = std.fmt.parseInt(i32, args[i], 10) catch return ParseError.InvalidValue;
-        } else if (std.mem.eql(u8, arg, "--order")) {
+        } else if (std.mem.eql(u8, arg, "--order") or std.mem.eql(u8, arg, "-o")) {
             i += 1;
             if (i >= args.len) return ParseError.MissingValue;
             if (std.mem.eql(u8, args[i], "asc")) {
@@ -86,11 +86,11 @@ pub fn parseArgs(args: []const []const u8) ParseError!types.CliOptions {
             } else {
                 return ParseError.InvalidValue;
             }
-        } else if (std.mem.eql(u8, arg, "--project")) {
+        } else if (std.mem.eql(u8, arg, "--project") or std.mem.eql(u8, arg, "-p")) {
             i += 1;
             if (i >= args.len) return ParseError.MissingValue;
             opts.project = args[i];
-        } else if (std.mem.eql(u8, arg, "--instances")) {
+        } else if (std.mem.eql(u8, arg, "--instances") or std.mem.eql(u8, arg, "-i")) {
             opts.instances = true;
         } else if (std.mem.eql(u8, arg, "--active")) {
             opts.active = true;
@@ -401,6 +401,59 @@ test "parseArgs: recent flag" {
 test "parseArgs: negative timezone offset" {
     const opts = try parseArgs(&[_][]const u8{ "--timezone", "-300" });
     try std.testing.expectEqual(@as(?i32, -300), opts.timezone_offset_minutes);
+}
+
+test "parseArgs: short flag -s for --since" {
+    const opts = try parseArgs(&[_][]const u8{ "-s", "20250101" });
+    try std.testing.expectEqualStrings("20250101", opts.since.?);
+}
+
+test "parseArgs: short flag -u for --until" {
+    const opts = try parseArgs(&[_][]const u8{ "-u", "20250131" });
+    try std.testing.expectEqualStrings("20250131", opts.until.?);
+}
+
+test "parseArgs: short flag -j for --json" {
+    const opts = try parseArgs(&[_][]const u8{"-j"});
+    try std.testing.expectEqual(true, opts.json);
+}
+
+test "parseArgs: short flag -o for --order" {
+    const opts = try parseArgs(&[_][]const u8{ "-o", "asc" });
+    try std.testing.expectEqual(types.SortOrder.asc, opts.order);
+}
+
+test "parseArgs: short flag -b for --breakdown" {
+    const opts = try parseArgs(&[_][]const u8{"-b"});
+    try std.testing.expectEqual(true, opts.breakdown);
+}
+
+test "parseArgs: short flag -z for --timezone" {
+    const opts = try parseArgs(&[_][]const u8{ "-z", "120" });
+    try std.testing.expectEqual(@as(?i32, 120), opts.timezone_offset_minutes);
+}
+
+test "parseArgs: short flag -p for --project" {
+    const opts = try parseArgs(&[_][]const u8{ "-p", "myproj" });
+    try std.testing.expectEqualStrings("myproj", opts.project.?);
+}
+
+test "parseArgs: short flag -i for --instances" {
+    const opts = try parseArgs(&[_][]const u8{"-i"});
+    try std.testing.expectEqual(true, opts.instances);
+}
+
+test "parseArgs: mixed short and long flags" {
+    const opts = try parseArgs(&[_][]const u8{ "daily", "-s", "20250101", "--until", "20250131", "-b" });
+    try std.testing.expectEqual(types.Command.daily, opts.command);
+    try std.testing.expectEqualStrings("20250101", opts.since.?);
+    try std.testing.expectEqualStrings("20250131", opts.until.?);
+    try std.testing.expectEqual(true, opts.breakdown);
+}
+
+test "parseArgs: short flag -s missing value returns error" {
+    const result = parseArgs(&[_][]const u8{"-s"});
+    try std.testing.expectError(ParseError.MissingValue, result);
 }
 
 test {
