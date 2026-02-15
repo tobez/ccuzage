@@ -8,6 +8,7 @@ const date = @import("date.zig");
 const blocks_mod = @import("blocks.zig");
 const json_output = @import("json_output.zig");
 const statusline_mod = @import("statusline.zig");
+const table_output = @import("table_output.zig");
 const pricing = @import("pricing.zig");
 
 const version = "blazing v0.1.0";
@@ -262,8 +263,8 @@ pub fn main() !void {
     } else date_filtered;
 
     // Dispatch based on command
-    const json_str: []u8 = switch (opts.command) {
-        .daily, .monthly, .weekly => blk: {
+    switch (opts.command) {
+        .daily, .monthly, .weekly => {
             const aggregated = switch (opts.command) {
                 .daily => aggregate.aggregateDaily(allocator, entries, tz_offset, opts.instances),
                 .monthly => aggregate.aggregateMonthly(allocator, entries, tz_offset, opts.instances),
@@ -276,41 +277,70 @@ pub fn main() !void {
             aggregate.sortAggregated(aggregated, opts.order);
             const totals = aggregate.calculateTotals(aggregated);
 
-            const result = if (opts.instances)
-                switch (opts.command) {
-                    .daily => json_output.projectGroupedToJson(allocator, "daily", "date", aggregated, totals),
-                    .monthly => json_output.projectGroupedToJson(allocator, "monthly", "month", aggregated, totals),
-                    .weekly => json_output.projectGroupedToJson(allocator, "weekly", "week", aggregated, totals),
+            if (opts.json) {
+                const json_str = if (opts.instances)
+                    switch (opts.command) {
+                        .daily => json_output.projectGroupedToJson(allocator, "daily", "date", aggregated, totals),
+                        .monthly => json_output.projectGroupedToJson(allocator, "monthly", "month", aggregated, totals),
+                        .weekly => json_output.projectGroupedToJson(allocator, "weekly", "week", aggregated, totals),
+                        else => unreachable,
+                    } catch {
+                        try stderr_print("Error: JSON serialization failed\n");
+                        std.process.exit(1);
+                    }
+                else
+                    switch (opts.command) {
+                        .daily => json_output.reportToJson(allocator, "daily", "date", aggregated, totals),
+                        .monthly => json_output.reportToJson(allocator, "monthly", "month", aggregated, totals),
+                        .weekly => json_output.reportToJson(allocator, "weekly", "week", aggregated, totals),
+                        else => unreachable,
+                    } catch {
+                        try stderr_print("Error: JSON serialization failed\n");
+                        std.process.exit(1);
+                    };
+                try stdout.print("{s}\n", .{json_str});
+            } else {
+                const period_label: []const u8 = switch (opts.command) {
+                    .daily => "Date",
+                    .weekly => "Week",
+                    .monthly => "Month",
                     else => unreachable,
-                } catch {
-                    try stderr_print("Error: JSON serialization failed\n");
-                    std.process.exit(1);
-                }
-            else
-                switch (opts.command) {
-                    .daily => json_output.reportToJson(allocator, "daily", "date", aggregated, totals),
-                    .monthly => json_output.reportToJson(allocator, "monthly", "month", aggregated, totals),
-                    .weekly => json_output.reportToJson(allocator, "weekly", "week", aggregated, totals),
-                    else => unreachable,
-                } catch {
-                    try stderr_print("Error: JSON serialization failed\n");
-                    std.process.exit(1);
                 };
-            break :blk result;
+                if (opts.instances) {
+                    table_output.writeProjectGroupedTable(stdout, aggregated, totals, opts.column_level, period_label, opts.breakdown) catch {
+                        try stderr_print("Error: table rendering failed\n");
+                        std.process.exit(1);
+                    };
+                } else {
+                    table_output.writeAggregatedTable(stdout, aggregated, totals, opts.column_level, period_label, opts.breakdown) catch {
+                        try stderr_print("Error: table rendering failed\n");
+                        std.process.exit(1);
+                    };
+                }
+            }
         },
-        .session => blk: {
+        .session => {
             const sessions = aggregate.aggregateSession(allocator, entries, tz_offset) catch {
                 try stderr_print("Error: session aggregation failed\n");
                 std.process.exit(1);
             };
             aggregate.sortSessions(sessions, opts.order);
             const totals = aggregate.calculateSessionTotals(sessions);
-            break :blk json_output.sessionToJson(allocator, sessions, totals) catch {
-                try stderr_print("Error: JSON serialization failed\n");
-                std.process.exit(1);
-            };
+
+            if (opts.json) {
+                const json_str = json_output.sessionToJson(allocator, sessions, totals) catch {
+                    try stderr_print("Error: JSON serialization failed\n");
+                    std.process.exit(1);
+                };
+                try stdout.print("{s}\n", .{json_str});
+            } else {
+                table_output.writeSessionTable(stdout, sessions, totals, opts.column_level, opts.breakdown) catch {
+                    try stderr_print("Error: table rendering failed\n");
+                    std.process.exit(1);
+                };
+            }
         },
-        .blocks => blk: {
+        .blocks => {
             const now_ms = std.time.milliTimestamp();
             var all_blocks = blocks_mod.identifyBlocks(allocator, entries, opts.session_length, now_ms) catch {
                 try stderr_print("Error: block identification failed\n");
@@ -330,15 +360,22 @@ pub fn main() !void {
                 });
             }
 
-            break :blk json_output.blocksToJson(allocator, all_blocks) catch {
-                try stderr_print("Error: JSON serialization failed\n");
-                std.process.exit(1);
-            };
+            if (opts.json) {
+                const json_str = json_output.blocksToJson(allocator, all_blocks) catch {
+                    try stderr_print("Error: JSON serialization failed\n");
+                    std.process.exit(1);
+                };
+                try stdout.print("{s}\n", .{json_str});
+            } else {
+                table_output.writeBlocksTable(stdout, all_blocks, opts.token_limit, tz_offset) catch {
+                    try stderr_print("Error: table rendering failed\n");
+                    std.process.exit(1);
+                };
+            }
         },
         .statusline => unreachable, // handled above before entry loading
-    };
+    }
 
-    try stdout.print("{s}\n", .{json_str});
     try stdout.flush();
 }
 
