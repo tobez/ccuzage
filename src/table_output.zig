@@ -352,6 +352,157 @@ pub fn writeAggregatedTable(
     try table.render(w);
 }
 
+fn sessionColumns(column_level: types.ColumnLevel) struct { cols: [MAX_COLS]Column, count: u8 } {
+    var result: [MAX_COLS]Column = undefined;
+    var n: u8 = 0;
+    const L = Alignment.left;
+    const R = Alignment.right;
+
+    result[n] = .{ .name = "Session", .alignment = L };
+    n += 1;
+
+    switch (column_level) {
+        .full => {
+            result[n] = .{ .name = "Models", .alignment = L };
+            n += 1;
+            result[n] = .{ .name = "Input", .alignment = R };
+            n += 1;
+            result[n] = .{ .name = "Output", .alignment = R };
+            n += 1;
+            result[n] = .{ .name = "Cache Create", .alignment = R };
+            n += 1;
+            result[n] = .{ .name = "Cache Read", .alignment = R };
+            n += 1;
+            result[n] = .{ .name = "Total", .alignment = R };
+            n += 1;
+            result[n] = .{ .name = "Cost", .alignment = R };
+            n += 1;
+        },
+        .mid => {
+            result[n] = .{ .name = "Models", .alignment = L };
+            n += 1;
+            result[n] = .{ .name = "Input", .alignment = R };
+            n += 1;
+            result[n] = .{ .name = "Output", .alignment = R };
+            n += 1;
+            result[n] = .{ .name = "Cache Read", .alignment = R };
+            n += 1;
+            result[n] = .{ .name = "Cost", .alignment = R };
+            n += 1;
+        },
+        .min => {
+            result[n] = .{ .name = "Models", .alignment = L };
+            n += 1;
+            result[n] = .{ .name = "Total Tokens", .alignment = R };
+            n += 1;
+            result[n] = .{ .name = "Cost", .alignment = R };
+            n += 1;
+        },
+    }
+
+    result[n] = .{ .name = "Project", .alignment = L };
+    n += 1;
+    result[n] = .{ .name = "Last Active", .alignment = L };
+    n += 1;
+
+    return .{ .cols = result, .count = n };
+}
+
+fn truncateSessionId(pool: *CellPool, session_id: []const u8) []const u8 {
+    if (session_id.len <= 8) return session_id;
+    return pool.put(session_id[session_id.len - 8 ..]);
+}
+
+fn projectBasename(path: []const u8) []const u8 {
+    if (path.len == 0) return "";
+    // Find last '/' that isn't trailing
+    var end = path.len;
+    while (end > 0 and path[end - 1] == '/') end -= 1;
+    if (end == 0) return "/";
+    var i = end;
+    while (i > 0) : (i -= 1) {
+        if (path[i - 1] == '/') return path[i..end];
+    }
+    return path[0..end];
+}
+
+/// Writes a session table to the writer.
+pub fn writeSessionTable(
+    w: *Writer,
+    items: []const types.SessionUsage,
+    totals: types.Totals,
+    column_level: types.ColumnLevel,
+    breakdown: bool,
+) Writer.Error!void {
+    const col_def = sessionColumns(column_level);
+    var table = Table.init(col_def.cols[0..col_def.count]);
+    var pool = CellPool.init();
+
+    for (items) |item| {
+        const total = item.input_tokens + item.output_tokens +
+            item.cache_creation_tokens + item.cache_read_tokens;
+        const session_str = truncateSessionId(&pool, item.session_id);
+        const models_str = joinModels(&pool, item.models_used);
+        const project_str = projectBasename(item.project_path);
+
+        switch (column_level) {
+            .full => table.addRow(&.{
+                session_str,
+                models_str,
+                pool.fmtTokens(item.input_tokens),
+                pool.fmtTokens(item.output_tokens),
+                pool.fmtTokens(item.cache_creation_tokens),
+                pool.fmtTokens(item.cache_read_tokens),
+                pool.fmtTokens(total),
+                pool.fmtCurrency(item.total_cost),
+                project_str,
+                item.last_activity,
+            }),
+            .mid => table.addRow(&.{
+                session_str,
+                models_str,
+                pool.fmtTokens(item.input_tokens),
+                pool.fmtTokens(item.output_tokens),
+                pool.fmtTokens(item.cache_read_tokens),
+                pool.fmtCurrency(item.total_cost),
+                project_str,
+                item.last_activity,
+            }),
+            .min => table.addRow(&.{
+                session_str,
+                models_str,
+                pool.fmtTokens(total),
+                pool.fmtCurrency(item.total_cost),
+                project_str,
+                item.last_activity,
+            }),
+        }
+
+        if (breakdown) {
+            for (item.model_breakdowns) |mb| {
+                const mb_total = mb.input_tokens + mb.output_tokens +
+                    mb.cache_creation_tokens + mb.cache_read_tokens;
+                const label = pool.fmt("  \xe2\x94\x94\xe2\x94\x80 {s}", .{mb.model_name});
+                switch (column_level) {
+                    .full => table.addRow(&.{ label, "", pool.fmtTokens(mb.input_tokens), pool.fmtTokens(mb.output_tokens), pool.fmtTokens(mb.cache_creation_tokens), pool.fmtTokens(mb.cache_read_tokens), pool.fmtTokens(mb_total), pool.fmtCurrency(mb.cost), "", "" }),
+                    .mid => table.addRow(&.{ label, "", pool.fmtTokens(mb.input_tokens), pool.fmtTokens(mb.output_tokens), pool.fmtTokens(mb.cache_read_tokens), pool.fmtCurrency(mb.cost), "", "" }),
+                    .min => table.addRow(&.{ label, "", pool.fmtTokens(mb_total), pool.fmtCurrency(mb.cost), "", "" }),
+                }
+            }
+        }
+    }
+
+    // Totals row
+    table.addSeparator();
+    switch (column_level) {
+        .full => table.addRow(&.{ "Total", "", pool.fmtTokens(totals.input_tokens), pool.fmtTokens(totals.output_tokens), pool.fmtTokens(totals.cache_creation_tokens), pool.fmtTokens(totals.cache_read_tokens), pool.fmtTokens(totals.total_tokens), pool.fmtCurrency(totals.total_cost), "", "" }),
+        .mid => table.addRow(&.{ "Total", "", pool.fmtTokens(totals.input_tokens), pool.fmtTokens(totals.output_tokens), pool.fmtTokens(totals.cache_read_tokens), pool.fmtCurrency(totals.total_cost), "", "" }),
+        .min => table.addRow(&.{ "Total", "", pool.fmtTokens(totals.total_tokens), pool.fmtCurrency(totals.total_cost), "", "" }),
+    }
+
+    try table.render(w);
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -582,4 +733,105 @@ test "writeAggregatedTable: mid columns" {
     try testing.expect(std.mem.indexOf(u8, output, "Output") != null);
     try testing.expect(std.mem.indexOf(u8, output, "Cache Read") != null);
     try testing.expect(std.mem.indexOf(u8, output, "Cache Create") == null);
+}
+
+test "projectBasename: typical path" {
+    try testing.expectEqualStrings("myproject", projectBasename("/home/user/myproject"));
+}
+
+test "projectBasename: trailing slash" {
+    try testing.expectEqualStrings("myproject", projectBasename("/home/user/myproject/"));
+}
+
+test "projectBasename: root" {
+    try testing.expectEqualStrings("/", projectBasename("/"));
+}
+
+test "projectBasename: empty" {
+    try testing.expectEqualStrings("", projectBasename(""));
+}
+
+test "projectBasename: no slash" {
+    try testing.expectEqualStrings("myproject", projectBasename("myproject"));
+}
+
+test "writeSessionTable: full columns" {
+    const models_used = [_][]const u8{"opus"};
+    const items = [_]types.SessionUsage{
+        .{
+            .session_id = "abc-def-1234-5678",
+            .project_path = "/home/user/myproject",
+            .input_tokens = 1000,
+            .output_tokens = 200,
+            .cache_creation_tokens = 50,
+            .cache_read_tokens = 300,
+            .total_cost = 1.50,
+            .last_activity = "2026-02-15",
+            .models_used = &models_used,
+            .model_breakdowns = &.{},
+        },
+    };
+    const totals = types.Totals{
+        .input_tokens = 1000,
+        .output_tokens = 200,
+        .cache_creation_tokens = 50,
+        .cache_read_tokens = 300,
+        .total_tokens = 1550,
+        .total_cost = 1.50,
+    };
+
+    const output = try writeToString(writeSessionTable, .{ &items, totals, .full, false });
+    defer testing.allocator.free(output);
+
+    // Has session columns
+    try testing.expect(std.mem.indexOf(u8, output, "Session") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "Project") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "Last Active") != null);
+    // Truncated session ID (last 8 chars)
+    try testing.expect(std.mem.indexOf(u8, output, "234-5678") != null);
+    // Project basename
+    try testing.expect(std.mem.indexOf(u8, output, "myproject") != null);
+    // Date
+    try testing.expect(std.mem.indexOf(u8, output, "2026-02-15") != null);
+    // Has token columns
+    try testing.expect(std.mem.indexOf(u8, output, "Input") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "Cost") != null);
+}
+
+test "writeSessionTable: min columns" {
+    const items = [_]types.SessionUsage{
+        .{
+            .session_id = "short",
+            .project_path = "/proj",
+            .input_tokens = 500,
+            .output_tokens = 100,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .total_cost = 0.50,
+            .last_activity = "2026-02-15",
+            .models_used = &.{},
+            .model_breakdowns = &.{},
+        },
+    };
+    const totals = types.Totals{
+        .input_tokens = 500,
+        .output_tokens = 100,
+        .cache_creation_tokens = 0,
+        .cache_read_tokens = 0,
+        .total_tokens = 600,
+        .total_cost = 0.50,
+    };
+
+    const output = try writeToString(writeSessionTable, .{ &items, totals, .min, false });
+    defer testing.allocator.free(output);
+
+    // Min mode: Session, Models, Total Tokens, Cost, Project, Last Active
+    try testing.expect(std.mem.indexOf(u8, output, "Session") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "Total Tokens") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "Project") != null);
+    // Should NOT have Input/Output columns
+    try testing.expect(std.mem.indexOf(u8, output, "Input") == null);
+    try testing.expect(std.mem.indexOf(u8, output, "Cache Read") == null);
+    // Short session ID used as-is
+    try testing.expect(std.mem.indexOf(u8, output, "short") != null);
 }
