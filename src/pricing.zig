@@ -1,6 +1,7 @@
-// ABOUTME: Hardcoded Claude model pricing table from LiteLLM data.
+// ABOUTME: Claude model pricing from LiteLLM data with dynamic fetching and disk caching.
 // ABOUTME: Calculates per-request costs from token counts when costUSD is absent.
 const std = @import("std");
+const scanner = @import("scanner.zig");
 
 pub const ModelPricing = struct {
     input_cost_per_token: f64,
@@ -70,6 +71,97 @@ const pricing_table = [_]struct { name: []const u8, pricing: ModelPricing }{
         },
     },
 };
+
+pub const DynamicModelEntry = struct {
+    name: []const u8,
+    pricing: ModelPricing,
+};
+
+fn isClaudeKey(key: []const u8) bool {
+    if (std.mem.startsWith(u8, key, "claude-")) return true;
+    if (std.mem.startsWith(u8, key, "anthropic/claude-")) return true;
+    if (std.mem.startsWith(u8, key, "anthropic.claude-")) return true;
+    return false;
+}
+
+fn skipWs(buf: []const u8, pos: usize) usize {
+    var p = pos;
+    while (p < buf.len and (buf[p] == ' ' or buf[p] == '\t' or buf[p] == '\n' or buf[p] == '\r')) {
+        p += 1;
+    }
+    return p;
+}
+
+fn extractOptionalF64(buf: []const u8, obj_start: usize, key: []const u8) ?f64 {
+    const pos = scanner.findKeyInObject(buf, obj_start, key) orelse return null;
+    const result = scanner.extractF64(buf, pos) orelse return null;
+    return result.value;
+}
+
+pub fn parseLiteLLMJson(allocator: std.mem.Allocator, json: []const u8) ![]DynamicModelEntry {
+    var entries: std.ArrayList(DynamicModelEntry) = .{};
+    errdefer {
+        for (entries.items) |entry| {
+            allocator.free(entry.name);
+        }
+        entries.deinit(allocator);
+    }
+
+    var p = skipWs(json, 0);
+    if (p >= json.len or json[p] != '{') return error.InvalidJson;
+    p += 1;
+
+    while (p < json.len) {
+        p = skipWs(json, p);
+        if (p >= json.len) return error.InvalidJson;
+        if (json[p] == '}') break;
+
+        // Parse key
+        const key_result = scanner.extractString(json, p) orelse return error.InvalidJson;
+        const key = key_result.value;
+        p = key_result.end;
+
+        // Skip colon
+        p = skipWs(json, p);
+        if (p >= json.len or json[p] != ':') return error.InvalidJson;
+        p += 1;
+        p = skipWs(json, p);
+
+        if (isClaudeKey(key)) {
+            // Value should be an object — extract pricing fields
+            if (p >= json.len or json[p] != '{') return error.InvalidJson;
+            const obj_start = p;
+
+            const pricing = ModelPricing{
+                .input_cost_per_token = extractOptionalF64(json, obj_start, "input_cost_per_token") orelse 0,
+                .output_cost_per_token = extractOptionalF64(json, obj_start, "output_cost_per_token") orelse 0,
+                .cache_creation_cost_per_token = extractOptionalF64(json, obj_start, "cache_creation_input_token_cost") orelse 0,
+                .cache_read_cost_per_token = extractOptionalF64(json, obj_start, "cache_read_input_token_cost") orelse 0,
+                .input_cost_above_200k = extractOptionalF64(json, obj_start, "input_cost_per_token_above_200k_tokens"),
+                .output_cost_above_200k = extractOptionalF64(json, obj_start, "output_cost_per_token_above_200k_tokens"),
+                .cache_creation_cost_above_200k = extractOptionalF64(json, obj_start, "cache_creation_input_token_cost_above_200k_tokens"),
+                .cache_read_cost_above_200k = extractOptionalF64(json, obj_start, "cache_read_input_token_cost_above_200k_tokens"),
+            };
+
+            const name = try allocator.dupe(u8, key);
+            try entries.append(allocator, .{ .name = name, .pricing = pricing });
+
+            // Skip past the value object
+            p = scanner.skipValue(json, obj_start) orelse return error.InvalidJson;
+        } else {
+            // Skip non-Claude model value
+            p = scanner.skipValue(json, p) orelse return error.InvalidJson;
+        }
+
+        // Skip comma
+        p = skipWs(json, p);
+        if (p < json.len and json[p] == ',') {
+            p += 1;
+        }
+    }
+
+    return entries.toOwnedSlice(allocator);
+}
 
 /// Look up pricing for a model name. Returns null for unknown models.
 pub fn lookupModel(model_name: []const u8) ?ModelPricing {
@@ -200,4 +292,137 @@ test "calculateCostForModel: known model" {
 test "calculateCostForModel: unknown model returns null" {
     const cost = calculateCostForModel("<synthetic>", 1000, 500, 0, 0);
     try std.testing.expect(cost == null);
+}
+
+// =============================================================================
+// LiteLLM JSON parsing tests
+// =============================================================================
+
+const test_fixture =
+    \\{
+    \\  "claude-opus-4-6": {
+    \\    "input_cost_per_token": 5e-06,
+    \\    "output_cost_per_token": 2.5e-05,
+    \\    "cache_creation_input_token_cost": 6.25e-06,
+    \\    "cache_read_input_token_cost": 5e-07,
+    \\    "input_cost_per_token_above_200k_tokens": 1e-05,
+    \\    "output_cost_per_token_above_200k_tokens": 3.75e-05,
+    \\    "cache_creation_input_token_cost_above_200k_tokens": 1.25e-05,
+    \\    "cache_read_input_token_cost_above_200k_tokens": 1e-06,
+    \\    "max_tokens": 128000,
+    \\    "litellm_provider": "anthropic"
+    \\  },
+    \\  "gpt-4": {
+    \\    "input_cost_per_token": 3e-05,
+    \\    "output_cost_per_token": 6e-05,
+    \\    "max_tokens": 8192
+    \\  },
+    \\  "claude-haiku-4-5-20251001": {
+    \\    "input_cost_per_token": 1e-06,
+    \\    "output_cost_per_token": 5e-06,
+    \\    "cache_creation_input_token_cost": 1.25e-06,
+    \\    "cache_read_input_token_cost": 1e-07,
+    \\    "max_tokens": 64000
+    \\  },
+    \\  "anthropic/claude-sonnet-4": {
+    \\    "input_cost_per_token": 3e-06,
+    \\    "output_cost_per_token": 1.5e-05,
+    \\    "max_tokens": 64000
+    \\  },
+    \\  "gemini-pro": {
+    \\    "input_cost_per_token": 1.25e-07,
+    \\    "output_cost_per_token": 3.75e-07,
+    \\    "max_tokens": 8192
+    \\  }
+    \\}
+;
+
+test "parseLiteLLMJson: extracts only Claude models" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    defer {
+        for (entries) |entry| {
+            std.testing.allocator.free(entry.name);
+        }
+        std.testing.allocator.free(entries);
+    }
+    // Should find 3 Claude models, skip gpt-4 and gemini-pro
+    try std.testing.expectEqual(@as(usize, 3), entries.len);
+}
+
+test "parseLiteLLMJson: field name mapping for tiered model" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    defer {
+        for (entries) |entry| {
+            std.testing.allocator.free(entry.name);
+        }
+        std.testing.allocator.free(entries);
+    }
+    // First entry should be claude-opus-4-6 with all pricing fields
+    try std.testing.expectEqualStrings("claude-opus-4-6", entries[0].name);
+    const p = entries[0].pricing;
+    try std.testing.expectApproxEqAbs(@as(f64, 5e-06), p.input_cost_per_token, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.5e-05), p.output_cost_per_token, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 6.25e-06), p.cache_creation_cost_per_token, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 5e-07), p.cache_read_cost_per_token, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 1e-05), p.input_cost_above_200k.?, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.75e-05), p.output_cost_above_200k.?, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.25e-05), p.cache_creation_cost_above_200k.?, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 1e-06), p.cache_read_cost_above_200k.?, 1e-10);
+}
+
+test "parseLiteLLMJson: tiered fields null when absent" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    defer {
+        for (entries) |entry| {
+            std.testing.allocator.free(entry.name);
+        }
+        std.testing.allocator.free(entries);
+    }
+    // Second entry is haiku — no tiered pricing
+    try std.testing.expectEqualStrings("claude-haiku-4-5-20251001", entries[1].name);
+    const p = entries[1].pricing;
+    try std.testing.expectApproxEqAbs(@as(f64, 1e-06), p.input_cost_per_token, 1e-10);
+    try std.testing.expect(p.input_cost_above_200k == null);
+    try std.testing.expect(p.output_cost_above_200k == null);
+    try std.testing.expect(p.cache_creation_cost_above_200k == null);
+    try std.testing.expect(p.cache_read_cost_above_200k == null);
+}
+
+test "parseLiteLLMJson: anthropic/ prefix models included" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    defer {
+        for (entries) |entry| {
+            std.testing.allocator.free(entry.name);
+        }
+        std.testing.allocator.free(entries);
+    }
+    // Third entry is anthropic/claude-sonnet-4
+    try std.testing.expectEqualStrings("anthropic/claude-sonnet-4", entries[2].name);
+    try std.testing.expectApproxEqAbs(@as(f64, 3e-06), entries[2].pricing.input_cost_per_token, 1e-10);
+}
+
+test "parseLiteLLMJson: empty object returns empty slice" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, "{}");
+    defer std.testing.allocator.free(entries);
+    try std.testing.expectEqual(@as(usize, 0), entries.len);
+}
+
+test "parseLiteLLMJson: invalid JSON returns error" {
+    const result = parseLiteLLMJson(std.testing.allocator, "not json");
+    try std.testing.expectError(error.InvalidJson, result);
+}
+
+test "parseLiteLLMJson: empty input returns error" {
+    const result = parseLiteLLMJson(std.testing.allocator, "");
+    try std.testing.expectError(error.InvalidJson, result);
+}
+
+test "isClaudeKey: identifies Claude model keys" {
+    try std.testing.expect(isClaudeKey("claude-opus-4-6"));
+    try std.testing.expect(isClaudeKey("claude-haiku-4-5-20251001"));
+    try std.testing.expect(isClaudeKey("anthropic/claude-sonnet-4"));
+    try std.testing.expect(isClaudeKey("anthropic.claude-3-5-haiku-20241022-v1:0"));
+    try std.testing.expect(!isClaudeKey("gpt-4"));
+    try std.testing.expect(!isClaudeKey("gemini-pro"));
+    try std.testing.expect(!isClaudeKey(""));
 }
