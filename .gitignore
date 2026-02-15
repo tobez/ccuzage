@@ -1,4 +1,5 @@
 zig-out/
 .zig-cache/
 .local/
+.claude/
 .worktrees/
