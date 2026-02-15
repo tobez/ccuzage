@@ -596,7 +596,8 @@ test "integration: zero tokens with nonzero duration produces zero burn rate" {
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), blks[0].cost_usd, 0.001);
 
     // burn_rate should exist (duration > 0) but tokens_per_minute = 0.0
-    const br = blks[0].burn_rate orelse return error.TestUnexpectedResult;
+    try std.testing.expect(blks[0].burn_rate != null);
+    const br = blks[0].burn_rate.?;
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), br.tokens_per_minute, 0.001);
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), br.cost_per_hour, 0.001);
 
@@ -688,6 +689,16 @@ test "integration: zero-cost entries aggregate correctly" {
         try std.testing.expectApproxEqAbs(@as(f64, 0.0), tot.get("totalCost").?.float, 0.001);
     }
 
+    // Session pipeline: zero cost aggregates correctly
+    {
+        const sessions = try aggregate.aggregateSession(allocator, entries, 0);
+        defer freeSessionUsage(allocator, sessions);
+        try std.testing.expectEqual(@as(usize, 1), sessions.len);
+        try std.testing.expectApproxEqAbs(@as(f64, 0.0), sessions[0].total_cost, 0.001);
+        try std.testing.expectEqual(@as(u64, 300), sessions[0].input_tokens);
+        try std.testing.expectEqual(@as(u64, 150), sessions[0].output_tokens);
+    }
+
     // Blocks pipeline: zero cost with nonzero duration => cost_per_hour = 0.0
     {
         const far_future: i64 = 2000000000000;
@@ -697,7 +708,8 @@ test "integration: zero-cost entries aggregate correctly" {
         try std.testing.expectEqual(@as(usize, 1), blks.len);
         try std.testing.expectApproxEqAbs(@as(f64, 0.0), blks[0].cost_usd, 0.001);
 
-        const br = blks[0].burn_rate orelse return error.TestUnexpectedResult;
+        try std.testing.expect(blks[0].burn_rate != null);
+    const br = blks[0].burn_rate.?;
         // tokens_per_minute should be nonzero (450 tokens / 60 min = 7.5)
         try std.testing.expect(br.tokens_per_minute > 0.0);
         // cost_per_hour should be 0
