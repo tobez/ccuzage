@@ -395,7 +395,7 @@ test "parseArgs: no args returns defaults" {
     const opts = try parseArgs(&[_][]const u8{});
     try std.testing.expectEqual(types.Command.daily, opts.command);
     try std.testing.expectEqual(false, opts.json);
-    try std.testing.expectEqual(types.SortOrder.desc, opts.order);
+    try std.testing.expectEqual(types.SortOrder.asc, opts.order);
     try std.testing.expectEqual(@as(u32, 5), opts.session_length);
     try std.testing.expectEqual(@as(?[]const u8, null), opts.since);
     try std.testing.expectEqual(@as(?[]const u8, null), opts.until);

@@ -142,7 +142,7 @@ pub const CliOptions = struct {
         .json = false,
         .breakdown = false,
         .timezone_offset_minutes = null,
-        .order = .desc,
+        .order = .asc,
         .project = null,
         .instances = false,
         .active = false,
@@ -195,7 +195,7 @@ test "CliOptions default has expected values" {
     try std.testing.expectEqual(false, opts.json);
     try std.testing.expectEqual(false, opts.breakdown);
     try std.testing.expectEqual(@as(?i32, null), opts.timezone_offset_minutes);
-    try std.testing.expectEqual(SortOrder.desc, opts.order);
+    try std.testing.expectEqual(SortOrder.asc, opts.order);
     try std.testing.expectEqual(@as(?[]const u8, null), opts.project);
     try std.testing.expectEqual(false, opts.instances);
     try std.testing.expectEqual(false, opts.active);

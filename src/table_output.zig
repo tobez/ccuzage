@@ -85,7 +85,7 @@ pub const Table = struct {
         try w.writeAll("│");
         for (0..cols) |c| {
             try w.writeByte(' ');
-            try writePadded(w, self.columns[c].name, widths[c], .left);
+            try writePadded(w, self.columns[c].name, widths[c], self.columns[c].alignment);
             try w.writeAll(" │");
         }
         try w.writeByte('\n');
@@ -184,6 +184,43 @@ const CellPool = struct {
     }
 };
 
+/// Shorten a model name by stripping "claude-" prefix and date suffixes.
+/// "claude-opus-4-6" → "opus-4-6"
+/// "claude-sonnet-4-5-20250929" → "sonnet-4-5"
+/// "<synthetic>" → "<synthetic>"
+fn shortenModelName(pool: *CellPool, name: []const u8) []const u8 {
+    // Strip "claude-" prefix
+    var s = name;
+    if (std.mem.startsWith(u8, s, "claude-")) {
+        s = s[7..];
+    }
+    // Strip date suffix (e.g., "-20250929", "-20251101")
+    // Look for -YYYYMMDD at the end (9 chars: dash + 8 digits)
+    if (s.len >= 9) {
+        const suffix_start = s.len - 9;
+        if (s[suffix_start] == '-') {
+            var all_digits = true;
+            for (s[suffix_start + 1 ..]) |c| {
+                if (c < '0' or c > '9') {
+                    all_digits = false;
+                    break;
+                }
+            }
+            if (all_digits) {
+                s = s[0..suffix_start];
+            }
+        }
+    }
+    return pool.put(s);
+}
+
+/// Format a model list as multi-line "- name" entries for the first model,
+/// returning just the first line. Additional model lines are added as separate rows.
+fn formatFirstModel(pool: *CellPool, models: []const []const u8) []const u8 {
+    if (models.len == 0) return "";
+    return pool.fmt("- {s}", .{shortenModelName(pool, models[0])});
+}
+
 fn joinModels(pool: *CellPool, models: []const []const u8) []const u8 {
     if (models.len == 0) return "";
     const start = pool.pos;
@@ -191,7 +228,7 @@ fn joinModels(pool: *CellPool, models: []const []const u8) []const u8 {
         if (i > 0) {
             _ = pool.put(", ");
         }
-        _ = pool.put(m);
+        _ = shortenModelName(pool, m);
     }
     return pool.buf[start..pool.pos];
 }
@@ -217,7 +254,7 @@ fn aggregatedColumns(period_label: []const u8, column_level: types.ColumnLevel) 
             n += 1;
             result[n] = .{ .name = "Cache Read", .alignment = R };
             n += 1;
-            result[n] = .{ .name = "Total", .alignment = R };
+            result[n] = .{ .name = "Total Tokens", .alignment = R };
             n += 1;
         },
         .mid => {
@@ -234,10 +271,41 @@ fn aggregatedColumns(period_label: []const u8, column_level: types.ColumnLevel) 
         },
     }
 
-    result[n] = .{ .name = "Cost", .alignment = R };
+    result[n] = .{ .name = "Cost (USD)", .alignment = R };
     n += 1;
 
     return .{ .cols = result, .count = n };
+}
+
+/// Helper to add an aggregated data row with numbers based on column level.
+fn addAggregatedRow(table: *Table, pool: *CellPool, column_level: types.ColumnLevel, period: []const u8, model: []const u8, in_tok: u64, out_tok: u64, cache_create: u64, cache_read: u64, cost: f64) void {
+    const total = in_tok + out_tok + cache_create + cache_read;
+    switch (column_level) {
+        .full => table.addRow(&.{
+            period, model,
+            pool.fmtTokens(in_tok), pool.fmtTokens(out_tok),
+            pool.fmtTokens(cache_create), pool.fmtTokens(cache_read),
+            pool.fmtTokens(total), pool.fmtCurrency(cost),
+        }),
+        .mid => table.addRow(&.{
+            period, model,
+            pool.fmtTokens(in_tok), pool.fmtTokens(out_tok),
+            pool.fmtTokens(cache_read), pool.fmtCurrency(cost),
+        }),
+        .min => table.addRow(&.{
+            period, model,
+            pool.fmtTokens(total), pool.fmtCurrency(cost),
+        }),
+    }
+}
+
+/// Helper to add a continuation row (empty period and numbers) for multi-line model display.
+fn addModelContinuationRow(table: *Table, column_level: types.ColumnLevel, model: []const u8) void {
+    switch (column_level) {
+        .full => table.addRow(&.{ "", model, "", "", "", "", "", "" }),
+        .mid => table.addRow(&.{ "", model, "", "", "", "" }),
+        .min => table.addRow(&.{ "", model, "", "" }),
+    }
 }
 
 /// Writes an aggregated table (daily/weekly/monthly) to the writer.
@@ -253,101 +321,33 @@ pub fn writeAggregatedTable(
     var table = Table.init(col_def.cols[0..col_def.count]);
     var pool = CellPool.init();
 
-    for (items) |item| {
-        const total = item.input_tokens + item.output_tokens +
-            item.cache_creation_tokens + item.cache_read_tokens;
-        const models_str = joinModels(&pool, item.models_used);
+    for (items, 0..) |item, item_idx| {
+        // First row: period, first model with "- " prefix, and numbers
+        const first_model = formatFirstModel(&pool, item.models_used);
+        addAggregatedRow(&table, &pool, column_level, item.period, first_model, item.input_tokens, item.output_tokens, item.cache_creation_tokens, item.cache_read_tokens, item.total_cost);
 
-        switch (column_level) {
-            .full => table.addRow(&.{
-                item.period,
-                models_str,
-                pool.fmtTokens(item.input_tokens),
-                pool.fmtTokens(item.output_tokens),
-                pool.fmtTokens(item.cache_creation_tokens),
-                pool.fmtTokens(item.cache_read_tokens),
-                pool.fmtTokens(total),
-                pool.fmtCurrency(item.total_cost),
-            }),
-            .mid => table.addRow(&.{
-                item.period,
-                models_str,
-                pool.fmtTokens(item.input_tokens),
-                pool.fmtTokens(item.output_tokens),
-                pool.fmtTokens(item.cache_read_tokens),
-                pool.fmtCurrency(item.total_cost),
-            }),
-            .min => table.addRow(&.{
-                item.period,
-                models_str,
-                pool.fmtTokens(total),
-                pool.fmtCurrency(item.total_cost),
-            }),
+        // Additional model rows (empty period, empty numbers)
+        if (item.models_used.len > 1) {
+            for (item.models_used[1..]) |model| {
+                const model_str = pool.fmt("- {s}", .{shortenModelName(&pool, model)});
+                addModelContinuationRow(&table, column_level, model_str);
+            }
         }
 
         if (breakdown) {
             for (item.model_breakdowns) |mb| {
-                const mb_total = mb.input_tokens + mb.output_tokens +
-                    mb.cache_creation_tokens + mb.cache_read_tokens;
-                const label = pool.fmt("  \xe2\x94\x94\xe2\x94\x80 {s}", .{mb.model_name});
-                switch (column_level) {
-                    .full => table.addRow(&.{
-                        label,
-                        "",
-                        pool.fmtTokens(mb.input_tokens),
-                        pool.fmtTokens(mb.output_tokens),
-                        pool.fmtTokens(mb.cache_creation_tokens),
-                        pool.fmtTokens(mb.cache_read_tokens),
-                        pool.fmtTokens(mb_total),
-                        pool.fmtCurrency(mb.cost),
-                    }),
-                    .mid => table.addRow(&.{
-                        label,
-                        "",
-                        pool.fmtTokens(mb.input_tokens),
-                        pool.fmtTokens(mb.output_tokens),
-                        pool.fmtTokens(mb.cache_read_tokens),
-                        pool.fmtCurrency(mb.cost),
-                    }),
-                    .min => table.addRow(&.{
-                        label,
-                        "",
-                        pool.fmtTokens(mb_total),
-                        pool.fmtCurrency(mb.cost),
-                    }),
-                }
+                const label = pool.fmt("  \xe2\x94\x94\xe2\x94\x80 {s}", .{shortenModelName(&pool, mb.model_name)});
+                addAggregatedRow(&table, &pool, column_level, "", label, mb.input_tokens, mb.output_tokens, mb.cache_creation_tokens, mb.cache_read_tokens, mb.cost);
             }
         }
+
+        // Separator after each group (including before totals)
+        _ = item_idx;
+        table.addSeparator();
     }
 
     // Totals row
-    table.addSeparator();
-    switch (column_level) {
-        .full => table.addRow(&.{
-            "Total",
-            "",
-            pool.fmtTokens(totals.input_tokens),
-            pool.fmtTokens(totals.output_tokens),
-            pool.fmtTokens(totals.cache_creation_tokens),
-            pool.fmtTokens(totals.cache_read_tokens),
-            pool.fmtTokens(totals.total_tokens),
-            pool.fmtCurrency(totals.total_cost),
-        }),
-        .mid => table.addRow(&.{
-            "Total",
-            "",
-            pool.fmtTokens(totals.input_tokens),
-            pool.fmtTokens(totals.output_tokens),
-            pool.fmtTokens(totals.cache_read_tokens),
-            pool.fmtCurrency(totals.total_cost),
-        }),
-        .min => table.addRow(&.{
-            "Total",
-            "",
-            pool.fmtTokens(totals.total_tokens),
-            pool.fmtCurrency(totals.total_cost),
-        }),
-    }
+    addAggregatedRow(&table, &pool, column_level, "Total", "", totals.input_tokens, totals.output_tokens, totals.cache_creation_tokens, totals.cache_read_tokens, totals.total_cost);
 
     try table.render(w);
 }
@@ -373,9 +373,9 @@ fn sessionColumns(column_level: types.ColumnLevel) struct { cols: [MAX_COLS]Colu
             n += 1;
             result[n] = .{ .name = "Cache Read", .alignment = R };
             n += 1;
-            result[n] = .{ .name = "Total", .alignment = R };
+            result[n] = .{ .name = "Total Tokens", .alignment = R };
             n += 1;
-            result[n] = .{ .name = "Cost", .alignment = R };
+            result[n] = .{ .name = "Cost (USD)", .alignment = R };
             n += 1;
         },
         .mid => {
@@ -387,7 +387,7 @@ fn sessionColumns(column_level: types.ColumnLevel) struct { cols: [MAX_COLS]Colu
             n += 1;
             result[n] = .{ .name = "Cache Read", .alignment = R };
             n += 1;
-            result[n] = .{ .name = "Cost", .alignment = R };
+            result[n] = .{ .name = "Cost (USD)", .alignment = R };
             n += 1;
         },
         .min => {
@@ -395,7 +395,7 @@ fn sessionColumns(column_level: types.ColumnLevel) struct { cols: [MAX_COLS]Colu
             n += 1;
             result[n] = .{ .name = "Total Tokens", .alignment = R };
             n += 1;
-            result[n] = .{ .name = "Cost", .alignment = R };
+            result[n] = .{ .name = "Cost (USD)", .alignment = R };
             n += 1;
         },
     }
@@ -482,7 +482,7 @@ pub fn writeSessionTable(
             for (item.model_breakdowns) |mb| {
                 const mb_total = mb.input_tokens + mb.output_tokens +
                     mb.cache_creation_tokens + mb.cache_read_tokens;
-                const label = pool.fmt("  \xe2\x94\x94\xe2\x94\x80 {s}", .{mb.model_name});
+                const label = pool.fmt("  \xe2\x94\x94\xe2\x94\x80 {s}", .{shortenModelName(&pool, mb.model_name)});
                 switch (column_level) {
                     .full => table.addRow(&.{ label, "", pool.fmtTokens(mb.input_tokens), pool.fmtTokens(mb.output_tokens), pool.fmtTokens(mb.cache_creation_tokens), pool.fmtTokens(mb.cache_read_tokens), pool.fmtTokens(mb_total), pool.fmtCurrency(mb.cost), "", "" }),
                     .mid => table.addRow(&.{ label, "", pool.fmtTokens(mb.input_tokens), pool.fmtTokens(mb.output_tokens), pool.fmtTokens(mb.cache_read_tokens), pool.fmtCurrency(mb.cost), "", "" }),
@@ -554,7 +554,7 @@ pub fn writeBlocksTable(
     n += 1;
     cols_buf[n] = .{ .name = "Tokens", .alignment = R };
     n += 1;
-    cols_buf[n] = .{ .name = "Cost", .alignment = R };
+    cols_buf[n] = .{ .name = "Cost (USD)", .alignment = R };
     n += 1;
     if (token_limit != null) {
         cols_buf[n] = .{ .name = "%", .alignment = R };
@@ -737,7 +737,7 @@ test "Table: render simple table" {
 
     const expected =
         \\┌──────┬────────┐
-        \\│ Name │ Cost   │
+        \\│ Name │   Cost │
         \\├──────┼────────┤
         \\│ Jan  │  $1.50 │
         \\│ Feb  │ $12.00 │
@@ -833,10 +833,11 @@ test "writeAggregatedTable: min columns" {
     try testing.expect(std.mem.indexOf(u8, output, "Month") != null);
     try testing.expect(std.mem.indexOf(u8, output, "Models") != null);
     try testing.expect(std.mem.indexOf(u8, output, "Total Tokens") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "Cost") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "Cost (USD)") != null);
     try testing.expect(std.mem.indexOf(u8, output, "1,550") != null);
     try testing.expect(std.mem.indexOf(u8, output, "$1.50") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "opus") != null);
+    // Models shown with "- " prefix
+    try testing.expect(std.mem.indexOf(u8, output, "- opus") != null);
     // Should NOT have Input/Output/Cache columns
     try testing.expect(std.mem.indexOf(u8, output, "Input") == null);
     try testing.expect(std.mem.indexOf(u8, output, "Output") == null);
@@ -914,6 +915,15 @@ test "writeAggregatedTable: mid columns" {
     try testing.expect(std.mem.indexOf(u8, output, "Output") != null);
     try testing.expect(std.mem.indexOf(u8, output, "Cache Read") != null);
     try testing.expect(std.mem.indexOf(u8, output, "Cache Create") == null);
+}
+
+test "shortenModelName: strips claude prefix and date suffix" {
+    var pool = CellPool.init();
+    try testing.expectEqualStrings("opus-4-6", shortenModelName(&pool, "claude-opus-4-6"));
+    try testing.expectEqualStrings("sonnet-4-5", shortenModelName(&pool, "claude-sonnet-4-5-20250929"));
+    try testing.expectEqualStrings("haiku-4-5", shortenModelName(&pool, "claude-haiku-4-5-20251001"));
+    try testing.expectEqualStrings("<synthetic>", shortenModelName(&pool, "<synthetic>"));
+    try testing.expectEqualStrings("opus-4-5", shortenModelName(&pool, "claude-opus-4-5-20251101"));
 }
 
 test "projectBasename: typical path" {
