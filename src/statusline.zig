@@ -36,18 +36,23 @@ const JsonStatusline = struct {
     context_window: JsonContextWindow,
 };
 
-pub fn parseStatuslineInput(allocator: std.mem.Allocator, input: []const u8) !StatuslineInput {
+/// Parses JSON from Claude Code's status bar hook into StatuslineInput.
+/// Caller must keep the returned parsed result alive while using the StatuslineInput,
+/// since string fields borrow from the parsed JSON arena.
+pub fn parseStatuslineInput(allocator: std.mem.Allocator, input: []const u8) !struct { value: StatuslineInput, parsed: std.json.Parsed(JsonStatusline) } {
     const parsed = try std.json.parseFromSlice(JsonStatusline, allocator, input, .{
         .ignore_unknown_fields = true,
     });
-    defer parsed.deinit();
 
-    return StatuslineInput{
-        .model_id = parsed.value.model.id,
-        .model_display_name = parsed.value.model.display_name,
-        .session_cost_usd = parsed.value.cost.total_cost_usd,
-        .context_tokens = parsed.value.context_window.total_input_tokens,
-        .context_window_size = parsed.value.context_window.context_window_size,
+    return .{
+        .value = StatuslineInput{
+            .model_id = parsed.value.model.id,
+            .model_display_name = parsed.value.model.display_name,
+            .session_cost_usd = parsed.value.cost.total_cost_usd,
+            .context_tokens = parsed.value.context_window.total_input_tokens,
+            .context_window_size = parsed.value.context_window.context_window_size,
+        },
+        .parsed = parsed,
     };
 }
 
@@ -92,7 +97,8 @@ fn formatTokenCount(buf: []u8, count: u64) []u8 {
 }
 
 fn formatTimeRemaining(buf: []u8, remaining_minutes: f64) []u8 {
-    const total_mins: u64 = @intFromFloat(remaining_minutes);
+    const clamped = @max(remaining_minutes, 0.0);
+    const total_mins: u64 = @intFromFloat(clamped);
     const hours = total_mins / 60;
     const mins = total_mins % 60;
     if (hours > 0) {
@@ -101,50 +107,50 @@ fn formatTimeRemaining(buf: []u8, remaining_minutes: f64) []u8 {
     return std.fmt.bufPrint(buf, "{d}m left", .{mins}) catch buf[0..0];
 }
 
-const BurnLevel = enum { normal, moderate, high };
+const BurnLevel = enum {
+    normal,
+    moderate,
+    high,
 
-fn classifyBurnRate(io_tokens_per_minute: f64) BurnLevel {
-    if (io_tokens_per_minute >= 5000.0) return .high;
-    if (io_tokens_per_minute >= 2000.0) return .moderate;
-    return .normal;
-}
+    fn classify(io_tokens_per_minute: f64) BurnLevel {
+        if (io_tokens_per_minute >= 5000.0) return .high;
+        if (io_tokens_per_minute >= 2000.0) return .moderate;
+        return .normal;
+    }
+
+    fn emoji(self: BurnLevel) []const u8 {
+        return switch (self) {
+            .normal => "\xf0\x9f\x9f\xa2",
+            .moderate => "\xf0\x9f\x9f\xa1",
+            .high => "\xf0\x9f\x94\xb4",
+        };
+    }
+
+    fn label(self: BurnLevel) []const u8 {
+        return switch (self) {
+            .normal => "Normal",
+            .moderate => "Moderate",
+            .high => "High",
+        };
+    }
+};
 
 fn formatBurnRate(buf: []u8, cost_per_hour: f64, io_tokens_per_minute: f64, visual: types.BurnRateVisual) []u8 {
     var cost_buf: [32]u8 = undefined;
-    const cost_str = std.fmt.bufPrint(&cost_buf, "${d:.2}", .{cost_per_hour}) catch return buf[0..0];
+    const cost_str = formatCurrency(&cost_buf, cost_per_hour);
 
-    const level = classifyBurnRate(io_tokens_per_minute);
+    const level = BurnLevel.classify(io_tokens_per_minute);
 
     return switch (visual) {
         .off => std.fmt.bufPrint(buf, "\xf0\x9f\x94\xa5 {s}/hr", .{cost_str}) catch buf[0..0],
         .emoji => std.fmt.bufPrint(buf, "\xf0\x9f\x94\xa5 {s}/hr {s}", .{
-            cost_str,
-            switch (level) {
-                .normal => "\xf0\x9f\x9f\xa2",
-                .moderate => "\xf0\x9f\x9f\xa1",
-                .high => "\xf0\x9f\x94\xb4",
-            },
+            cost_str, level.emoji(),
         }) catch buf[0..0],
         .text => std.fmt.bufPrint(buf, "\xf0\x9f\x94\xa5 {s}/hr ({s})", .{
-            cost_str,
-            switch (level) {
-                .normal => "Normal",
-                .moderate => "Moderate",
-                .high => "High",
-            },
+            cost_str, level.label(),
         }) catch buf[0..0],
         .emoji_text => std.fmt.bufPrint(buf, "\xf0\x9f\x94\xa5 {s}/hr {s} ({s})", .{
-            cost_str,
-            switch (level) {
-                .normal => "\xf0\x9f\x9f\xa2",
-                .moderate => "\xf0\x9f\x9f\xa1",
-                .high => "\xf0\x9f\x94\xb4",
-            },
-            switch (level) {
-                .normal => "Normal",
-                .moderate => "Moderate",
-                .high => "High",
-            },
+            cost_str, level.emoji(), level.label(),
         }) catch buf[0..0],
     };
 }
@@ -222,11 +228,18 @@ fn formatRichStatusline(buf: []u8, data: StatuslineData) []u8 {
     } else {
         const pct: u64 = data.context_tokens * 100 / data.context_window_size;
         var pct_buf: [16]u8 = undefined;
-        const pct_str = std.fmt.bufPrint(&pct_buf, " ({d}%)", .{pct}) catch "";
+        const pct_str = std.fmt.bufPrint(&pct_buf, " ({d}%)", .{pct}) catch pct_buf[0..0];
         writer.append(buf, &pos, pct_str);
     }
 
     return buf[0..pos];
+}
+
+fn computeIoTokensPerMinute(io_tokens: u64, total_tokens: u64, total_tokens_per_minute: f64) ?f64 {
+    if (total_tokens_per_minute <= 0 or total_tokens == 0) return null;
+    const io_f: f64 = @floatFromInt(io_tokens);
+    const total_f: f64 = @floatFromInt(total_tokens);
+    return io_f * total_tokens_per_minute / total_f;
 }
 
 const TodayData = struct {
@@ -276,18 +289,14 @@ fn loadTodayData(allocator: std.mem.Allocator, tz_offset: i32, session_length: u
         const burn_rate = block.burn_rate;
         const remaining = if (block.projection) |proj| proj.remaining_minutes else null;
 
-        // Compute IO tokens per minute from block data
-        var io_tpm: ?f64 = null;
-        if (burn_rate) |br| {
-            if (br.tokens_per_minute > 0) {
-                const total_tokens_f: f64 = @floatFromInt(block.totalTokens());
-                const duration_min = total_tokens_f / br.tokens_per_minute;
-                if (duration_min > 0) {
-                    const io_tokens: f64 = @floatFromInt(block.input_tokens + block.output_tokens);
-                    io_tpm = io_tokens / duration_min;
-                }
-            }
-        }
+        const io_tpm: ?f64 = if (burn_rate) |br|
+            computeIoTokensPerMinute(
+                block.input_tokens + block.output_tokens,
+                block.totalTokens(),
+                br.tokens_per_minute,
+            )
+        else
+            null;
 
         return TodayData{
             .today_cost = totals.total_cost,
@@ -311,8 +320,9 @@ pub fn runStatusline(allocator: std.mem.Allocator) !void {
     const input = try std.fs.File.stdin().readToEndAlloc(allocator, 1024 * 1024);
     defer allocator.free(input);
 
-    const parsed = try parseStatuslineInput(allocator, input);
-    const output = try formatStatusline(allocator, parsed);
+    const result = try parseStatuslineInput(allocator, input);
+    defer result.parsed.deinit();
+    const output = try formatStatusline(allocator, result.value);
     defer allocator.free(output);
 
     var stdout_buffer: [4096]u8 = undefined;
@@ -331,11 +341,12 @@ test "parseStatuslineInput: parse valid input with all fields" {
         \\{"session_id":"abc","transcript_path":"/tmp/session.jsonl","cwd":"/home","model":{"id":"claude-sonnet-4-20250514","display_name":"Sonnet 4"},"cost":{"total_cost_usd":0.056},"context_window":{"total_input_tokens":42500,"context_window_size":200000}}
     ;
     const result = try parseStatuslineInput(std.testing.allocator, input);
-    try std.testing.expectEqualStrings("claude-sonnet-4-20250514", result.model_id);
-    try std.testing.expectEqualStrings("Sonnet 4", result.model_display_name);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.056), result.session_cost_usd, 0.0001);
-    try std.testing.expectEqual(@as(u64, 42500), result.context_tokens);
-    try std.testing.expectEqual(@as(u64, 200000), result.context_window_size);
+    defer result.parsed.deinit();
+    try std.testing.expectEqualStrings("claude-sonnet-4-20250514", result.value.model_id);
+    try std.testing.expectEqualStrings("Sonnet 4", result.value.model_display_name);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.056), result.value.session_cost_usd, 0.0001);
+    try std.testing.expectEqual(@as(u64, 42500), result.value.context_tokens);
+    try std.testing.expectEqual(@as(u64, 200000), result.value.context_window_size);
 }
 
 test "parseStatuslineInput: parse minimal input with required fields only" {
@@ -343,11 +354,12 @@ test "parseStatuslineInput: parse minimal input with required fields only" {
         \\{"model":{"id":"claude-opus-4","display_name":"Opus 4"},"cost":{"total_cost_usd":1.23},"context_window":{"total_input_tokens":100000,"context_window_size":200000}}
     ;
     const result = try parseStatuslineInput(std.testing.allocator, input);
-    try std.testing.expectEqualStrings("claude-opus-4", result.model_id);
-    try std.testing.expectEqualStrings("Opus 4", result.model_display_name);
-    try std.testing.expectApproxEqAbs(@as(f64, 1.23), result.session_cost_usd, 0.0001);
-    try std.testing.expectEqual(@as(u64, 100000), result.context_tokens);
-    try std.testing.expectEqual(@as(u64, 200000), result.context_window_size);
+    defer result.parsed.deinit();
+    try std.testing.expectEqualStrings("claude-opus-4", result.value.model_id);
+    try std.testing.expectEqualStrings("Opus 4", result.value.model_display_name);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.23), result.value.session_cost_usd, 0.0001);
+    try std.testing.expectEqual(@as(u64, 100000), result.value.context_tokens);
+    try std.testing.expectEqual(@as(u64, 200000), result.value.context_window_size);
 }
 
 test "formatStatusline: formats output correctly" {
@@ -587,4 +599,24 @@ test "formatRichStatusline: zero context window" {
         "\xf0\x9f\xa4\x96 Opus | \xf0\x9f\x92\xb0 $0.10 session / $0.10 today / No active block | \xf0\x9f\xa7\xa0 1,000 (?%)",
         result,
     );
+}
+
+test "formatTimeRemaining: negative input clamps to zero" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("0m left", formatTimeRemaining(&buf, -5.0));
+}
+
+test "computeIoTokensPerMinute: typical block" {
+    // 8000 IO tokens out of 10000 total, at 100 total tokens/min
+    // Expected: 8000 * 100 / 10000 = 80 IO tokens/min
+    const result = computeIoTokensPerMinute(8000, 10000, 100.0);
+    try std.testing.expectApproxEqAbs(@as(f64, 80.0), result.?, 0.01);
+}
+
+test "computeIoTokensPerMinute: zero total tokens returns null" {
+    try std.testing.expect(computeIoTokensPerMinute(0, 0, 100.0) == null);
+}
+
+test "computeIoTokensPerMinute: zero rate returns null" {
+    try std.testing.expect(computeIoTokensPerMinute(5000, 10000, 0.0) == null);
 }
