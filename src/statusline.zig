@@ -56,7 +56,6 @@ pub fn parseStatuslineInput(allocator: std.mem.Allocator, input: []const u8) !st
     };
 }
 
-
 fn formatCurrency(buf: []u8, amount: f64) []u8 {
     return std.fmt.bufPrint(buf, "${d:.2}", .{amount}) catch buf[0..0];
 }
@@ -324,8 +323,10 @@ pub fn runStatusline(
         .io_tokens_per_minute = null,
     };
 
+    const model_name = if (parsed.model_display_name.len > 64) parsed.model_display_name[0..64] else parsed.model_display_name;
+
     const data = StatuslineData{
-        .model_display_name = parsed.model_display_name,
+        .model_display_name = model_name,
         .session_cost = parsed.session_cost_usd,
         .today_cost = today.today_cost,
         .block_cost = today.block_cost,
@@ -376,7 +377,6 @@ test "parseStatuslineInput: parse minimal input with required fields only" {
     try std.testing.expectEqual(@as(u64, 100000), result.value.context_tokens);
     try std.testing.expectEqual(@as(u64, 200000), result.value.context_window_size);
 }
-
 
 test "formatCurrency: typical amount" {
     var buf: [32]u8 = undefined;
