@@ -207,14 +207,90 @@ fn fetchToCache(allocator: std.mem.Allocator, cache_path: []const u8) !void {
     }
 }
 
-/// Look up pricing for a model name. Returns null for unknown models.
-pub fn lookupModel(model_name: []const u8) ?ModelPricing {
+fn readFileAbsolute(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = try std.fs.openFileAbsolute(path, .{});
+    defer file.close();
+    return file.readToEndAlloc(allocator, 16 * 1024 * 1024); // 16MB max
+}
+
+var dynamic_state: ?struct { table: []DynamicModelEntry } = null;
+
+/// Load dynamic pricing from LiteLLM cache. All errors are non-fatal.
+pub fn initDynamic(allocator: std.mem.Allocator) void {
+    const cache_dir = getCacheDir(allocator) catch return;
+    defer allocator.free(cache_dir);
+
+    // Ensure cache directory exists
+    if (std.fs.path.dirname(cache_dir)) |parent| {
+        std.fs.makeDirAbsolute(parent) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return,
+        };
+    }
+    std.fs.makeDirAbsolute(cache_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return,
+    };
+
+    const cache_path = std.fs.path.join(allocator, &.{ cache_dir, cache_filename }) catch return;
+    defer allocator.free(cache_path);
+
+    const json = if (isCacheFresh(cache_path))
+        readFileAbsolute(allocator, cache_path) catch return
+    else blk: {
+        fetchToCache(allocator, cache_path) catch {
+            // Fetch failed — try stale cache
+            break :blk readFileAbsolute(allocator, cache_path) catch return;
+        };
+        break :blk readFileAbsolute(allocator, cache_path) catch return;
+    };
+    defer allocator.free(json);
+
+    const table = parseLiteLLMJson(allocator, json) catch return;
+    dynamic_state = .{ .table = table };
+}
+
+/// Free dynamic pricing state.
+pub fn deinitDynamic(allocator: std.mem.Allocator) void {
+    if (dynamic_state) |state| {
+        for (state.table) |entry| {
+            allocator.free(entry.name);
+        }
+        allocator.free(state.table);
+        dynamic_state = null;
+    }
+}
+
+fn lookupHardcoded(model_name: []const u8) ?ModelPricing {
     for (&pricing_table) |*entry| {
         if (std.mem.eql(u8, entry.name, model_name)) {
             return entry.pricing;
         }
     }
     return null;
+}
+
+/// Look up pricing for a model name. Checks dynamic table first, then hardcoded.
+pub fn lookupModel(model_name: []const u8) ?ModelPricing {
+    if (dynamic_state) |state| {
+        // Exact match in dynamic table
+        for (state.table) |entry| {
+            if (std.mem.eql(u8, entry.name, model_name)) {
+                return entry.pricing;
+            }
+        }
+        // Try matching "anthropic/<model_name>" entries
+        const prefix = "anthropic/";
+        for (state.table) |entry| {
+            if (entry.name.len == prefix.len + model_name.len and
+                std.mem.startsWith(u8, entry.name, prefix) and
+                std.mem.eql(u8, entry.name[prefix.len..], model_name))
+            {
+                return entry.pricing;
+            }
+        }
+    }
+    return lookupHardcoded(model_name);
 }
 
 /// Calculate cost for tokens with optional tiered pricing.
@@ -484,6 +560,48 @@ test "isCacheFresh: fresh file returns true" {
 
 test "isCacheFresh: missing file returns false" {
     try std.testing.expect(!isCacheFresh("/nonexistent/path/to/file.json"));
+}
+
+// =============================================================================
+// Dynamic lookup tests
+// =============================================================================
+
+test "lookupModel: finds model in dynamic table" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    dynamic_state = .{ .table = entries };
+    defer deinitDynamic(std.testing.allocator);
+
+    const p = lookupModel("claude-opus-4-6");
+    try std.testing.expect(p != null);
+    try std.testing.expectApproxEqAbs(@as(f64, 5e-06), p.?.input_cost_per_token, 1e-10);
+}
+
+test "lookupModel: anthropic/ prefix matching" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    dynamic_state = .{ .table = entries };
+    defer deinitDynamic(std.testing.allocator);
+
+    // "claude-sonnet-4" should match "anthropic/claude-sonnet-4" in dynamic table
+    const p = lookupModel("claude-sonnet-4");
+    try std.testing.expect(p != null);
+    try std.testing.expectApproxEqAbs(@as(f64, 3e-06), p.?.input_cost_per_token, 1e-10);
+}
+
+test "lookupModel: falls back to hardcoded when not in dynamic" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    dynamic_state = .{ .table = entries };
+    defer deinitDynamic(std.testing.allocator);
+
+    // claude-opus-4-5-20251101 is in hardcoded table but not in test fixture
+    const p = lookupModel("claude-opus-4-5-20251101");
+    try std.testing.expect(p != null);
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0e-6), p.?.input_cost_per_token, 1e-10);
+}
+
+test "lookupModel: no dynamic state uses hardcoded only" {
+    dynamic_state = null;
+    try std.testing.expect(lookupModel("claude-opus-4-6") != null);
+    try std.testing.expect(lookupModel("gpt-4") == null);
 }
 
 test "isClaudeKey: identifies Claude model keys" {
