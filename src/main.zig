@@ -467,4 +467,5 @@ test {
     _ = @import("statusline.zig");
     _ = @import("integration_test.zig");
     _ = @import("scanner.zig");
+    _ = @import("pricing.zig");
 }

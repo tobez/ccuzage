@@ -4,6 +4,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const date = @import("date.zig");
 const scanner = @import("scanner.zig");
+const pricing = @import("pricing.zig");
 
 pub fn parseLine(
     allocator: std.mem.Allocator,
@@ -61,7 +62,8 @@ pub fn parseLine(
         .output_tokens = scanned.output_tokens,
         .cache_creation_tokens = scanned.cache_creation_tokens,
         .cache_read_tokens = scanned.cache_read_tokens,
-        .cost_usd = scanned.cost_usd orelse 0.0,
+        .cost_usd = scanned.cost_usd orelse
+            pricing.calculateCostForModel(model_raw, scanned.input_tokens, scanned.output_tokens, scanned.cache_creation_tokens, scanned.cache_read_tokens) orelse 0.0,
         .message_id = message_id,
         .request_id = request_id,
     };
@@ -130,7 +132,7 @@ test "parseLine - line without cache tokens defaults to 0" {
     try std.testing.expectEqual(@as(u64, 200), e.output_tokens);
 }
 
-test "parseLine - line without costUSD defaults to 0.0" {
+test "parseLine - unknown model without costUSD defaults to 0.0" {
     const line =
         \\{"timestamp":"2025-01-15T10:30:00.000Z","message":{"usage":{"input_tokens":100,"output_tokens":20},"model":"claude-haiku-3","id":"msg-003"},"requestId":"req-003"}
     ;
@@ -144,6 +146,25 @@ test "parseLine - line without costUSD defaults to 0.0" {
     }
 
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), e.cost_usd, 0.001);
+}
+
+test "parseLine - known model without costUSD calculates cost from tokens" {
+    const line =
+        \\{"timestamp":"2025-01-15T10:30:00.000Z","message":{"usage":{"input_tokens":1000,"output_tokens":500},"model":"claude-haiku-4-5-20251001","id":"msg-004"},"requestId":"req-004"}
+    ;
+    const entry = parseLine(std.testing.allocator, line, "sess-1", "/proj");
+    try std.testing.expect(entry != null);
+    const e = entry.?;
+    defer {
+        std.testing.allocator.free(e.model);
+        std.testing.allocator.free(e.message_id);
+        std.testing.allocator.free(e.request_id);
+    }
+
+    // haiku: 1000 * $1/M + 500 * $5/M = $0.001 + $0.0025 = $0.0035
+    const expected = 1000.0 * 1.0e-6 + 500.0 * 5.0e-6;
+    try std.testing.expectApproxEqAbs(expected, e.cost_usd, 1e-9);
+    try std.testing.expect(e.cost_usd > 0.0);
 }
 
 test "parseLine - isApiErrorMessage true returns null" {
