@@ -313,6 +313,74 @@ pub fn blocksToJson(allocator: std.mem.Allocator, blocks: []const types.SessionB
     return aw.toOwnedSlice();
 }
 
+/// Writes a project-grouped report as JSON.
+/// Items are grouped by their .project field into a "projects" object,
+/// with each project key mapping to an array of aggregated items.
+pub fn writeProjectGroupedJson(
+    w: *Writer,
+    comptime command_name: []const u8,
+    comptime period_key: []const u8,
+    items: []const types.AggregatedUsage,
+    totals: types.Totals,
+) Writer.Error!void {
+    _ = command_name; // grouping uses "projects" key instead
+    try w.writeAll("{\"projects\":{");
+
+    // Collect unique project names in order of first appearance
+    var seen_projects: [256][]const u8 = undefined;
+    var project_count: usize = 0;
+
+    for (items) |item| {
+        const proj = item.project orelse continue;
+        var found = false;
+        for (seen_projects[0..project_count]) |sp| {
+            if (std.mem.eql(u8, sp, proj)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            seen_projects[project_count] = proj;
+            project_count += 1;
+        }
+    }
+
+    // Write each project's items
+    for (seen_projects[0..project_count], 0..) |proj, pi| {
+        if (pi > 0) try w.writeByte(',');
+        try writeJsonString(w, proj);
+        try w.writeAll(":[");
+
+        var first = true;
+        for (items) |item| {
+            const item_proj = item.project orelse continue;
+            if (!std.mem.eql(u8, item_proj, proj)) continue;
+            if (!first) try w.writeByte(',');
+            try writeAggregatedItem(w, period_key, item);
+            first = false;
+        }
+        try w.writeByte(']');
+    }
+
+    try w.writeAll("},\"totals\":");
+    try writeTotals(w, totals);
+    try w.writeByte('}');
+}
+
+/// Returns an allocated JSON string for project-grouped report data.
+pub fn projectGroupedToJson(
+    allocator: std.mem.Allocator,
+    comptime command_name: []const u8,
+    comptime period_key: []const u8,
+    items: []const types.AggregatedUsage,
+    totals: types.Totals,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try writeProjectGroupedJson(&aw.writer, command_name, period_key, items, totals);
+    return aw.toOwnedSlice();
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -937,4 +1005,87 @@ test "blocks JSON empty blocks array" {
 
     // No totals key
     try testing.expectEqual(@as(?std.json.Value, null), root.get("totals"));
+}
+
+test "project-grouped JSON nests items by project" {
+    const allocator = testing.allocator;
+
+    const items = [_]types.AggregatedUsage{
+        .{
+            .period = "2025-01-15",
+            .input_tokens = 100,
+            .output_tokens = 10,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .total_cost = 0.01,
+            .models_used = &.{},
+            .model_breakdowns = &.{},
+            .project = "project-a",
+        },
+        .{
+            .period = "2025-01-15",
+            .input_tokens = 200,
+            .output_tokens = 20,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .total_cost = 0.02,
+            .models_used = &.{},
+            .model_breakdowns = &.{},
+            .project = "project-b",
+        },
+        .{
+            .period = "2025-01-16",
+            .input_tokens = 300,
+            .output_tokens = 30,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .total_cost = 0.03,
+            .models_used = &.{},
+            .model_breakdowns = &.{},
+            .project = "project-a",
+        },
+    };
+
+    const totals = types.Totals{
+        .input_tokens = 600,
+        .output_tokens = 60,
+        .cache_creation_tokens = 0,
+        .cache_read_tokens = 0,
+        .total_tokens = 660,
+        .total_cost = 0.06,
+    };
+
+    const json_str = try projectGroupedToJson(allocator, "daily", "date", &items, totals);
+    defer allocator.free(json_str);
+
+    const parsed = try parseJsonValue(allocator, json_str);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    // Top-level has "projects" object and "totals"
+    const projects = root.get("projects").?.object;
+    try testing.expect(projects.contains("project-a"));
+    try testing.expect(projects.contains("project-b"));
+
+    // project-a has 2 items
+    const proj_a = projects.get("project-a").?.array;
+    try testing.expectEqual(@as(usize, 2), proj_a.items.len);
+
+    // project-b has 1 item
+    const proj_b = projects.get("project-b").?.array;
+    try testing.expectEqual(@as(usize, 1), proj_b.items.len);
+
+    // Verify item structure within a project
+    const first_a = proj_a.items[0].object;
+    try testing.expect(first_a.contains("date"));
+    try testing.expect(first_a.contains("inputTokens"));
+    try testing.expect(first_a.contains("totalCost"));
+
+    // Verify totals are present
+    const tot = root.get("totals").?.object;
+    try testing.expectEqual(@as(i64, 600), tot.get("inputTokens").?.integer);
+    try testing.expectApproxEqAbs(0.06, tot.get("totalCost").?.float, 0.000001);
+
+    // No top-level "daily" key
+    try testing.expectEqual(@as(?std.json.Value, null), root.get("daily"));
 }

@@ -213,9 +213,9 @@ pub fn main() !void {
     const json_str: []u8 = switch (opts.command) {
         .daily, .monthly, .weekly => blk: {
             const aggregated = switch (opts.command) {
-                .daily => aggregate.aggregateDaily(allocator, entries, opts.timezone_offset_minutes),
-                .monthly => aggregate.aggregateMonthly(allocator, entries, opts.timezone_offset_minutes),
-                .weekly => aggregate.aggregateWeekly(allocator, entries, opts.timezone_offset_minutes, 0),
+                .daily => aggregate.aggregateDaily(allocator, entries, opts.timezone_offset_minutes, opts.instances),
+                .monthly => aggregate.aggregateMonthly(allocator, entries, opts.timezone_offset_minutes, opts.instances),
+                .weekly => aggregate.aggregateWeekly(allocator, entries, opts.timezone_offset_minutes, 0, opts.instances),
                 else => unreachable,
             } catch {
                 try stderr_print("Error: aggregation failed\n");
@@ -224,15 +224,26 @@ pub fn main() !void {
             aggregate.sortAggregated(aggregated, opts.order);
             const totals = aggregate.calculateTotals(aggregated);
 
-            const result = switch (opts.command) {
-                .daily => json_output.reportToJson(allocator, "daily", "date", aggregated, totals),
-                .monthly => json_output.reportToJson(allocator, "monthly", "month", aggregated, totals),
-                .weekly => json_output.reportToJson(allocator, "weekly", "week", aggregated, totals),
-                else => unreachable,
-            } catch {
-                try stderr_print("Error: JSON serialization failed\n");
-                std.process.exit(1);
-            };
+            const result = if (opts.instances)
+                switch (opts.command) {
+                    .daily => json_output.projectGroupedToJson(allocator, "daily", "date", aggregated, totals),
+                    .monthly => json_output.projectGroupedToJson(allocator, "monthly", "month", aggregated, totals),
+                    .weekly => json_output.projectGroupedToJson(allocator, "weekly", "week", aggregated, totals),
+                    else => unreachable,
+                } catch {
+                    try stderr_print("Error: JSON serialization failed\n");
+                    std.process.exit(1);
+                }
+            else
+                switch (opts.command) {
+                    .daily => json_output.reportToJson(allocator, "daily", "date", aggregated, totals),
+                    .monthly => json_output.reportToJson(allocator, "monthly", "month", aggregated, totals),
+                    .weekly => json_output.reportToJson(allocator, "weekly", "week", aggregated, totals),
+                    else => unreachable,
+                } catch {
+                    try stderr_print("Error: JSON serialization failed\n");
+                    std.process.exit(1);
+                };
             break :blk result;
         },
         .session => blk: {
@@ -256,35 +267,15 @@ pub fn main() !void {
 
             // Apply --active or --recent filters
             if (opts.active) {
-                var filtered: std.ArrayList(types.SessionBlock) = .{};
-                for (all_blocks) |block| {
-                    if (block.is_active) {
-                        filtered.append(allocator, block) catch {
-                            try stderr_print("Error: block filtering failed\n");
-                            std.process.exit(1);
-                        };
-                    }
-                }
-                all_blocks = filtered.toOwnedSlice(allocator) catch {
+                all_blocks = @constCast(blocks_mod.filterActive(allocator, all_blocks) catch {
                     try stderr_print("Error: block filtering failed\n");
                     std.process.exit(1);
-                };
+                });
             } else if (opts.recent) {
-                const three_days_ms: i64 = 3 * 24 * 60 * 60 * 1000;
-                const cutoff = now_ms - three_days_ms;
-                var filtered: std.ArrayList(types.SessionBlock) = .{};
-                for (all_blocks) |block| {
-                    if (block.start_time >= cutoff or block.is_active) {
-                        filtered.append(allocator, block) catch {
-                            try stderr_print("Error: block filtering failed\n");
-                            std.process.exit(1);
-                        };
-                    }
-                }
-                all_blocks = filtered.toOwnedSlice(allocator) catch {
+                all_blocks = @constCast(blocks_mod.filterRecent(allocator, all_blocks, now_ms, 3) catch {
                     try stderr_print("Error: block filtering failed\n");
                     std.process.exit(1);
-                };
+                });
             }
 
             break :blk json_output.blocksToJson(allocator, all_blocks) catch {
