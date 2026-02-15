@@ -17,7 +17,7 @@ pub const ScannedEntry = struct {
 };
 
 /// Skip whitespace and return position of next non-whitespace char.
-fn skipWhitespace(buf: []const u8, pos: usize) usize {
+pub fn skipWhitespace(buf: []const u8, pos: usize) usize {
     var p = pos;
     while (p < buf.len and (buf[p] == ' ' or buf[p] == '\t' or buf[p] == '\n' or buf[p] == '\r')) {
         p += 1;

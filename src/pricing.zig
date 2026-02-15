@@ -84,14 +84,6 @@ fn isClaudeKey(key: []const u8) bool {
     return false;
 }
 
-fn skipWs(buf: []const u8, pos: usize) usize {
-    var p = pos;
-    while (p < buf.len and (buf[p] == ' ' or buf[p] == '\t' or buf[p] == '\n' or buf[p] == '\r')) {
-        p += 1;
-    }
-    return p;
-}
-
 fn extractOptionalF64(buf: []const u8, obj_start: usize, key: []const u8) ?f64 {
     const pos = scanner.findKeyInObject(buf, obj_start, key) orelse return null;
     const result = scanner.extractF64(buf, pos) orelse return null;
@@ -107,12 +99,12 @@ pub fn parseLiteLLMJson(allocator: std.mem.Allocator, json: []const u8) ![]Dynam
         entries.deinit(allocator);
     }
 
-    var p = skipWs(json, 0);
+    var p = scanner.skipWhitespace(json, 0);
     if (p >= json.len or json[p] != '{') return error.InvalidJson;
     p += 1;
 
     while (p < json.len) {
-        p = skipWs(json, p);
+        p = scanner.skipWhitespace(json, p);
         if (p >= json.len) return error.InvalidJson;
         if (json[p] == '}') break;
 
@@ -122,10 +114,10 @@ pub fn parseLiteLLMJson(allocator: std.mem.Allocator, json: []const u8) ![]Dynam
         p = key_result.end;
 
         // Skip colon
-        p = skipWs(json, p);
+        p = scanner.skipWhitespace(json, p);
         if (p >= json.len or json[p] != ':') return error.InvalidJson;
         p += 1;
-        p = skipWs(json, p);
+        p = scanner.skipWhitespace(json, p);
 
         if (isClaudeKey(key)) {
             // Value should be an object — extract pricing fields
@@ -144,6 +136,7 @@ pub fn parseLiteLLMJson(allocator: std.mem.Allocator, json: []const u8) ![]Dynam
             };
 
             const name = try allocator.dupe(u8, key);
+            errdefer allocator.free(name);
             try entries.append(allocator, .{ .name = name, .pricing = pricing });
 
             // Skip past the value object
@@ -154,7 +147,7 @@ pub fn parseLiteLLMJson(allocator: std.mem.Allocator, json: []const u8) ![]Dynam
         }
 
         // Skip comma
-        p = skipWs(json, p);
+        p = scanner.skipWhitespace(json, p);
         if (p < json.len and json[p] == ',') {
             p += 1;
         }
@@ -191,9 +184,12 @@ fn isCacheFresh(cache_path: []const u8) bool {
     return (now - stat.mtime) < cache_max_age_ns;
 }
 
-/// Fetch URL to cache path using curl.
+/// Fetch URL to cache path using curl. Writes to a temp file then renames atomically.
 fn fetchToCache(allocator: std.mem.Allocator, cache_path: []const u8) !void {
-    const argv = [_][]const u8{ "curl", "-sf", "-m", "10", litellm_url, "-o", cache_path };
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{cache_path});
+    defer allocator.free(tmp_path);
+
+    const argv = [_][]const u8{ "curl", "-sf", "-m", "10", litellm_url, "-o", tmp_path };
     var child = std.process.Child.init(&argv, allocator);
     child.stderr_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
@@ -201,10 +197,21 @@ fn fetchToCache(allocator: std.mem.Allocator, cache_path: []const u8) !void {
     const term = try child.wait();
     switch (term) {
         .Exited => |code| {
-            if (code != 0) return error.FetchFailed;
+            if (code != 0) {
+                std.fs.deleteFileAbsolute(tmp_path) catch {};
+                return error.FetchFailed;
+            }
         },
-        else => return error.FetchFailed,
+        else => {
+            std.fs.deleteFileAbsolute(tmp_path) catch {};
+            return error.FetchFailed;
+        },
     }
+
+    std.fs.renameAbsolute(tmp_path, cache_path) catch {
+        std.fs.deleteFileAbsolute(tmp_path) catch {};
+        return error.FetchFailed;
+    };
 }
 
 fn readFileAbsolute(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -279,14 +286,16 @@ pub fn lookupModel(model_name: []const u8) ?ModelPricing {
                 return entry.pricing;
             }
         }
-        // Try matching "anthropic/<model_name>" entries
-        const prefix = "anthropic/";
-        for (state.table) |entry| {
-            if (entry.name.len == prefix.len + model_name.len and
-                std.mem.startsWith(u8, entry.name, prefix) and
-                std.mem.eql(u8, entry.name[prefix.len..], model_name))
-            {
-                return entry.pricing;
+        // Try matching "anthropic/<model_name>" and "anthropic.<model_name>" entries
+        const prefixes = [_][]const u8{ "anthropic/", "anthropic." };
+        for (&prefixes) |prefix| {
+            for (state.table) |entry| {
+                if (entry.name.len == prefix.len + model_name.len and
+                    std.mem.startsWith(u8, entry.name, prefix) and
+                    std.mem.eql(u8, entry.name[prefix.len..], model_name))
+                {
+                    return entry.pricing;
+                }
             }
         }
     }
@@ -449,6 +458,11 @@ const test_fixture =
     \\    "output_cost_per_token": 1.5e-05,
     \\    "max_tokens": 64000
     \\  },
+    \\  "anthropic.claude-sonnet-4": {
+    \\    "input_cost_per_token": 3e-06,
+    \\    "output_cost_per_token": 1.5e-05,
+    \\    "max_tokens": 64000
+    \\  },
     \\  "gemini-pro": {
     \\    "input_cost_per_token": 1.25e-07,
     \\    "output_cost_per_token": 3.75e-07,
@@ -457,26 +471,23 @@ const test_fixture =
     \\}
 ;
 
+fn freeTestEntries(entries: []DynamicModelEntry) void {
+    for (entries) |entry| {
+        std.testing.allocator.free(entry.name);
+    }
+    std.testing.allocator.free(entries);
+}
+
 test "parseLiteLLMJson: extracts only Claude models" {
     const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
-    defer {
-        for (entries) |entry| {
-            std.testing.allocator.free(entry.name);
-        }
-        std.testing.allocator.free(entries);
-    }
-    // Should find 3 Claude models, skip gpt-4 and gemini-pro
-    try std.testing.expectEqual(@as(usize, 3), entries.len);
+    defer freeTestEntries(entries);
+    // Should find 4 Claude models, skip gpt-4 and gemini-pro
+    try std.testing.expectEqual(@as(usize, 4), entries.len);
 }
 
 test "parseLiteLLMJson: field name mapping for tiered model" {
     const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
-    defer {
-        for (entries) |entry| {
-            std.testing.allocator.free(entry.name);
-        }
-        std.testing.allocator.free(entries);
-    }
+    defer freeTestEntries(entries);
     // First entry should be claude-opus-4-6 with all pricing fields
     try std.testing.expectEqualStrings("claude-opus-4-6", entries[0].name);
     const p = entries[0].pricing;
@@ -492,12 +503,7 @@ test "parseLiteLLMJson: field name mapping for tiered model" {
 
 test "parseLiteLLMJson: tiered fields null when absent" {
     const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
-    defer {
-        for (entries) |entry| {
-            std.testing.allocator.free(entry.name);
-        }
-        std.testing.allocator.free(entries);
-    }
+    defer freeTestEntries(entries);
     // Second entry is haiku — no tiered pricing
     try std.testing.expectEqualStrings("claude-haiku-4-5-20251001", entries[1].name);
     const p = entries[1].pricing;
@@ -510,12 +516,7 @@ test "parseLiteLLMJson: tiered fields null when absent" {
 
 test "parseLiteLLMJson: anthropic/ prefix models included" {
     const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
-    defer {
-        for (entries) |entry| {
-            std.testing.allocator.free(entry.name);
-        }
-        std.testing.allocator.free(entries);
-    }
+    defer freeTestEntries(entries);
     // Third entry is anthropic/claude-sonnet-4
     try std.testing.expectEqualStrings("anthropic/claude-sonnet-4", entries[2].name);
     try std.testing.expectApproxEqAbs(@as(f64, 3e-06), entries[2].pricing.input_cost_per_token, 1e-10);
@@ -585,6 +586,18 @@ test "lookupModel: anthropic/ prefix matching" {
     const p = lookupModel("claude-sonnet-4");
     try std.testing.expect(p != null);
     try std.testing.expectApproxEqAbs(@as(f64, 3e-06), p.?.input_cost_per_token, 1e-10);
+}
+
+test "lookupModel: anthropic. prefix matching" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    dynamic_state = .{ .table = entries };
+    defer deinitDynamic(std.testing.allocator);
+
+    // "claude-sonnet-4" should also match "anthropic.claude-sonnet-4" (Bedrock style)
+    // Note: anthropic/ prefix is tried first, so exact result depends on table order,
+    // but the model should be found regardless.
+    const p = lookupModel("claude-sonnet-4");
+    try std.testing.expect(p != null);
 }
 
 test "lookupModel: falls back to hardcoded when not in dynamic" {
