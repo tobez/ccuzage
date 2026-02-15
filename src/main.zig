@@ -2,6 +2,10 @@
 // ABOUTME: Parses command-line flags and dispatches to the appropriate action.
 const std = @import("std");
 const types = @import("types.zig");
+const loader = @import("loader.zig");
+const aggregate = @import("aggregate.zig");
+const blocks_mod = @import("blocks.zig");
+const json_output = @import("json_output.zig");
 
 const version = "blazing v0.1.0";
 
@@ -158,18 +162,142 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    // Debug output for now (command dispatch comes in Task 18)
-    try stdout.print("command={s} json={} breakdown={} order={s} instances={} active={} recent={} session_length={d}\n", .{
-        @tagName(opts.command),
-        opts.json,
-        opts.breakdown,
-        @tagName(opts.order),
-        opts.instances,
-        opts.active,
-        opts.recent,
-        opts.session_length,
-    });
+    const allocator = std.heap.smp_allocator;
+
+    // Load all entries
+    const all_entries = loader.loadAllEntries(allocator) catch {
+        try stderr_print("Error: failed to load usage data\n");
+        std.process.exit(1);
+    };
+
+    // Filter by date range
+    const date_filtered = aggregate.filterByDateRange(
+        allocator,
+        all_entries,
+        opts.since,
+        opts.until,
+        opts.timezone_offset_minutes,
+    ) catch {
+        try stderr_print("Error: failed to filter by date range\n");
+        std.process.exit(1);
+    };
+
+    // Filter by project (if --project set)
+    const entries = if (opts.project) |project_name| blk: {
+        var filtered: std.ArrayList(types.UsageEntry) = .{};
+        for (date_filtered) |entry| {
+            if (std.mem.eql(u8, entry.project, project_name)) {
+                filtered.append(allocator, entry) catch {
+                    try stderr_print("Error: failed to filter by project\n");
+                    std.process.exit(1);
+                };
+            }
+        }
+        break :blk filtered.toOwnedSlice(allocator) catch {
+            try stderr_print("Error: failed to filter by project\n");
+            std.process.exit(1);
+        };
+    } else date_filtered;
+
+    // Dispatch based on command
+    const json_str: []u8 = switch (opts.command) {
+        .daily, .monthly, .weekly => blk: {
+            const aggregated = switch (opts.command) {
+                .daily => aggregate.aggregateDaily(allocator, entries, opts.timezone_offset_minutes),
+                .monthly => aggregate.aggregateMonthly(allocator, entries, opts.timezone_offset_minutes),
+                .weekly => aggregate.aggregateWeekly(allocator, entries, opts.timezone_offset_minutes, 0),
+                else => unreachable,
+            } catch {
+                try stderr_print("Error: aggregation failed\n");
+                std.process.exit(1);
+            };
+            aggregate.sortAggregated(aggregated, opts.order);
+            const totals = aggregate.calculateTotals(aggregated);
+
+            const result = switch (opts.command) {
+                .daily => json_output.reportToJson(allocator, "daily", "date", aggregated, totals),
+                .monthly => json_output.reportToJson(allocator, "monthly", "month", aggregated, totals),
+                .weekly => json_output.reportToJson(allocator, "weekly", "week", aggregated, totals),
+                else => unreachable,
+            } catch {
+                try stderr_print("Error: JSON serialization failed\n");
+                std.process.exit(1);
+            };
+            break :blk result;
+        },
+        .session => blk: {
+            const sessions = aggregate.aggregateSession(allocator, entries, opts.timezone_offset_minutes) catch {
+                try stderr_print("Error: session aggregation failed\n");
+                std.process.exit(1);
+            };
+            aggregate.sortSessions(sessions, opts.order);
+            const totals = aggregate.calculateSessionTotals(sessions);
+            break :blk json_output.sessionToJson(allocator, sessions, totals) catch {
+                try stderr_print("Error: JSON serialization failed\n");
+                std.process.exit(1);
+            };
+        },
+        .blocks => blk: {
+            const now_ms = std.time.milliTimestamp();
+            var all_blocks = blocks_mod.identifyBlocks(allocator, entries, opts.session_length, now_ms) catch {
+                try stderr_print("Error: block identification failed\n");
+                std.process.exit(1);
+            };
+
+            // Apply --active or --recent filters
+            if (opts.active) {
+                var filtered: std.ArrayList(types.SessionBlock) = .{};
+                for (all_blocks) |block| {
+                    if (block.is_active) {
+                        filtered.append(allocator, block) catch {
+                            try stderr_print("Error: block filtering failed\n");
+                            std.process.exit(1);
+                        };
+                    }
+                }
+                all_blocks = filtered.toOwnedSlice(allocator) catch {
+                    try stderr_print("Error: block filtering failed\n");
+                    std.process.exit(1);
+                };
+            } else if (opts.recent) {
+                const three_days_ms: i64 = 3 * 24 * 60 * 60 * 1000;
+                const cutoff = now_ms - three_days_ms;
+                var filtered: std.ArrayList(types.SessionBlock) = .{};
+                for (all_blocks) |block| {
+                    if (block.start_time >= cutoff or block.is_active) {
+                        filtered.append(allocator, block) catch {
+                            try stderr_print("Error: block filtering failed\n");
+                            std.process.exit(1);
+                        };
+                    }
+                }
+                all_blocks = filtered.toOwnedSlice(allocator) catch {
+                    try stderr_print("Error: block filtering failed\n");
+                    std.process.exit(1);
+                };
+            }
+
+            break :blk json_output.blocksToJson(allocator, all_blocks) catch {
+                try stderr_print("Error: JSON serialization failed\n");
+                std.process.exit(1);
+            };
+        },
+        .statusline => {
+            try stderr_print("statusline not yet implemented\n");
+            std.process.exit(1);
+        },
+    };
+
+    try stdout.print("{s}\n", .{json_str});
     try stdout.flush();
+}
+
+fn stderr_print(msg: []const u8) !void {
+    var stderr_buffer: [4096]u8 = undefined;
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    const stderr = &stderr_writer.interface;
+    try stderr.writeAll(msg);
+    try stderr.flush();
 }
 
 // =============================================================================
