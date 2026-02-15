@@ -61,6 +61,41 @@ pub fn formatStatusline(allocator: std.mem.Allocator, input: StatuslineInput) ![
     });
 }
 
+fn formatCurrency(buf: []u8, amount: f64) []u8 {
+    return std.fmt.bufPrint(buf, "${d:.2}", .{amount}) catch buf[0..0];
+}
+
+fn formatTokenCount(buf: []u8, count: u64) []u8 {
+    if (count == 0) {
+        buf[0] = '0';
+        return buf[0..1];
+    }
+    // Format number with comma separators by building from right to left
+    var tmp: [32]u8 = undefined;
+    const plain = std.fmt.bufPrint(&tmp, "{d}", .{count}) catch return buf[0..0];
+    var pos: usize = 0;
+    for (plain, 0..) |c, i| {
+        const remaining = plain.len - i;
+        if (i > 0 and remaining % 3 == 0) {
+            buf[pos] = ',';
+            pos += 1;
+        }
+        buf[pos] = c;
+        pos += 1;
+    }
+    return buf[0..pos];
+}
+
+fn formatTimeRemaining(buf: []u8, remaining_minutes: f64) []u8 {
+    const total_mins: u64 = @intFromFloat(remaining_minutes);
+    const hours = total_mins / 60;
+    const mins = total_mins % 60;
+    if (hours > 0) {
+        return std.fmt.bufPrint(buf, "{d}h {d}m left", .{ hours, mins }) catch buf[0..0];
+    }
+    return std.fmt.bufPrint(buf, "{d}m left", .{mins}) catch buf[0..0];
+}
+
 pub fn runStatusline(allocator: std.mem.Allocator) !void {
     const input = try std.fs.File.stdin().readToEndAlloc(allocator, 1024 * 1024);
     defer allocator.free(input);
@@ -128,4 +163,64 @@ test "formatStatusline: zero context window shows question mark" {
     const result = try formatStatusline(std.testing.allocator, input);
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("Opus 4 | $2.5000 | ? ctx", result);
+}
+
+test "formatCurrency: typical amount" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("$0.23", formatCurrency(&buf, 0.23));
+}
+
+test "formatCurrency: zero" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("$0.00", formatCurrency(&buf, 0.0));
+}
+
+test "formatCurrency: large amount" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("$12.34", formatCurrency(&buf, 12.34));
+}
+
+test "formatCurrency: tiny amount" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("$0.01", formatCurrency(&buf, 0.005));
+}
+
+test "formatTokenCount: small number" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("500", formatTokenCount(&buf, 500));
+}
+
+test "formatTokenCount: thousands" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("25,000", formatTokenCount(&buf, 25000));
+}
+
+test "formatTokenCount: millions" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("1,234,567", formatTokenCount(&buf, 1234567));
+}
+
+test "formatTokenCount: zero" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("0", formatTokenCount(&buf, 0));
+}
+
+test "formatTimeRemaining: hours and minutes" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("2h 45m left", formatTimeRemaining(&buf, 165.0));
+}
+
+test "formatTimeRemaining: minutes only" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("45m left", formatTimeRemaining(&buf, 45.0));
+}
+
+test "formatTimeRemaining: exact hours" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("3h 0m left", formatTimeRemaining(&buf, 180.0));
+}
+
+test "formatTimeRemaining: less than one minute" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("0m left", formatTimeRemaining(&buf, 0.5));
 }

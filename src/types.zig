@@ -113,6 +113,8 @@ pub const Command = enum {
 
 pub const SortOrder = enum { asc, desc };
 
+pub const BurnRateVisual = enum { off, emoji, text, emoji_text };
+
 pub const CliOptions = struct {
     command: Command,
     since: ?[]const u8, // YYYYMMDD
@@ -128,6 +130,7 @@ pub const CliOptions = struct {
     recent: bool,
     session_length: u32, // hours, default 5
     token_limit: ?u64,
+    burn_rate_visual: BurnRateVisual,
 
     pub const default = CliOptions{
         .command = .daily,
@@ -143,6 +146,7 @@ pub const CliOptions = struct {
         .recent = false,
         .session_length = 5,
         .token_limit = null,
+        .burn_rate_visual = .off,
     };
 };
 
@@ -194,6 +198,7 @@ test "CliOptions default has expected values" {
     try std.testing.expectEqual(false, opts.recent);
     try std.testing.expectEqual(@as(u32, 5), opts.session_length);
     try std.testing.expectEqual(@as(?u64, null), opts.token_limit);
+    try std.testing.expectEqual(BurnRateVisual.off, opts.burn_rate_visual);
 }
 
 test "Totals struct fields are accessible" {

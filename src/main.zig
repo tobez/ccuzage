@@ -105,6 +105,20 @@ pub fn parseArgs(args: []const []const u8) ParseError!types.CliOptions {
             i += 1;
             if (i >= args.len) return ParseError.MissingValue;
             opts.token_limit = std.fmt.parseInt(u64, args[i], 10) catch return ParseError.InvalidValue;
+        } else if (std.mem.eql(u8, arg, "--visual-burn-rate") or std.mem.eql(u8, arg, "-B")) {
+            i += 1;
+            if (i >= args.len) return ParseError.MissingValue;
+            if (std.mem.eql(u8, args[i], "off")) {
+                opts.burn_rate_visual = .off;
+            } else if (std.mem.eql(u8, args[i], "emoji")) {
+                opts.burn_rate_visual = .emoji;
+            } else if (std.mem.eql(u8, args[i], "text")) {
+                opts.burn_rate_visual = .text;
+            } else if (std.mem.eql(u8, args[i], "emoji-text")) {
+                opts.burn_rate_visual = .emoji_text;
+            } else {
+                return ParseError.InvalidValue;
+            }
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return ParseError.UnknownFlag;
         } else {
@@ -473,6 +487,31 @@ test "parseArgs: mixed short and long flags" {
 
 test "parseArgs: short flag -s missing value returns error" {
     const result = parseArgs(&[_][]const u8{"-s"});
+    try std.testing.expectError(ParseError.MissingValue, result);
+}
+
+test "parseArgs: --visual-burn-rate emoji" {
+    const opts = try parseArgs(&[_][]const u8{ "statusline", "--visual-burn-rate", "emoji" });
+    try std.testing.expectEqual(types.BurnRateVisual.emoji, opts.burn_rate_visual);
+}
+
+test "parseArgs: -B text" {
+    const opts = try parseArgs(&[_][]const u8{ "statusline", "-B", "text" });
+    try std.testing.expectEqual(types.BurnRateVisual.text, opts.burn_rate_visual);
+}
+
+test "parseArgs: --visual-burn-rate emoji-text" {
+    const opts = try parseArgs(&[_][]const u8{ "--visual-burn-rate", "emoji-text" });
+    try std.testing.expectEqual(types.BurnRateVisual.emoji_text, opts.burn_rate_visual);
+}
+
+test "parseArgs: --visual-burn-rate invalid value returns error" {
+    const result = parseArgs(&[_][]const u8{ "--visual-burn-rate", "sparkles" });
+    try std.testing.expectError(ParseError.InvalidValue, result);
+}
+
+test "parseArgs: -B missing value returns error" {
+    const result = parseArgs(&[_][]const u8{"-B"});
     try std.testing.expectError(ParseError.MissingValue, result);
 }
 
