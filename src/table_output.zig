@@ -503,6 +503,101 @@ pub fn writeSessionTable(
     try table.render(w);
 }
 
+fn formatBlockTime(pool: *CellPool, epoch_ms: i64, tz_offset: i32) []const u8 {
+    const c = date.epochMillisToComponents(epoch_ms, tz_offset);
+    return pool.fmt("{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{
+        c.year, c.month, c.day, c.hour, c.minute,
+    });
+}
+
+fn formatDuration(pool: *CellPool, start_ms: i64, end_ms: i64) []const u8 {
+    const diff_ms = end_ms - start_ms;
+    if (diff_ms < 0) return "0m";
+    const total_mins: u64 = @intCast(@divTrunc(diff_ms, 60_000));
+    const hours = total_mins / 60;
+    const mins = total_mins % 60;
+    if (hours > 0) {
+        return pool.fmt("{d}h {d:0>2}m", .{ hours, mins });
+    }
+    return pool.fmt("{d}m", .{mins});
+}
+
+fn formatGapDuration(pool: *CellPool, start_ms: i64, end_ms: i64) []const u8 {
+    const diff_ms = end_ms - start_ms;
+    if (diff_ms < 0) return "(0m gap)";
+    const total_mins: u64 = @intCast(@divTrunc(diff_ms, 60_000));
+    const hours = total_mins / 60;
+    const mins = total_mins % 60;
+    if (hours > 0) {
+        return pool.fmt("({d}h {d:0>2}m gap)", .{ hours, mins });
+    }
+    return pool.fmt("({d}m gap)", .{mins});
+}
+
+/// Writes a blocks table to the writer.
+pub fn writeBlocksTable(
+    w: *Writer,
+    blocks: []const types.SessionBlock,
+    token_limit: ?u64,
+    tz_offset: i32,
+) Writer.Error!void {
+    var cols_buf: [MAX_COLS]Column = undefined;
+    var n: u8 = 0;
+    const L = Alignment.left;
+    const R = Alignment.right;
+
+    cols_buf[n] = .{ .name = "Block Start", .alignment = L };
+    n += 1;
+    cols_buf[n] = .{ .name = "Duration", .alignment = L };
+    n += 1;
+    cols_buf[n] = .{ .name = "Models", .alignment = L };
+    n += 1;
+    cols_buf[n] = .{ .name = "Tokens", .alignment = R };
+    n += 1;
+    cols_buf[n] = .{ .name = "Cost", .alignment = R };
+    n += 1;
+    if (token_limit != null) {
+        cols_buf[n] = .{ .name = "%", .alignment = R };
+        n += 1;
+    }
+
+    var table = Table.init(cols_buf[0..n]);
+    var pool = CellPool.init();
+    const has_limit = token_limit != null;
+
+    for (blocks) |block| {
+        if (block.is_gap) {
+            const gap_str = formatGapDuration(&pool, block.start_time, block.end_time);
+            if (has_limit) {
+                table.addRow(&.{ gap_str, "", "", "", "", "" });
+            } else {
+                table.addRow(&.{ gap_str, "", "", "", "" });
+            }
+            continue;
+        }
+
+        const time_str = formatBlockTime(&pool, block.start_time, tz_offset);
+        const actual_end = block.actual_end_time orelse block.end_time;
+        const dur_str = if (block.is_active)
+            pool.fmt("ACTIVE {s}", .{formatDuration(&pool, block.start_time, actual_end)})
+        else
+            formatDuration(&pool, block.start_time, actual_end);
+        const models_str = joinModels(&pool, block.models);
+        const tokens_str = pool.fmtTokens(block.totalTokens());
+        const cost_str = pool.fmtCurrency(block.cost_usd);
+
+        if (has_limit) {
+            const pct = block.totalTokens() * 100 / token_limit.?;
+            const pct_str = pool.fmt("{d}%", .{pct});
+            table.addRow(&.{ time_str, dur_str, models_str, tokens_str, cost_str, pct_str });
+        } else {
+            table.addRow(&.{ time_str, dur_str, models_str, tokens_str, cost_str });
+        }
+    }
+
+    try table.render(w);
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -834,4 +929,123 @@ test "writeSessionTable: min columns" {
     try testing.expect(std.mem.indexOf(u8, output, "Cache Read") == null);
     // Short session ID used as-is
     try testing.expect(std.mem.indexOf(u8, output, "short") != null);
+}
+
+test "writeBlocksTable: basic block" {
+    const models = [_][]const u8{"opus"};
+    const blocks = [_]types.SessionBlock{
+        .{
+            .id = "2026-02-15T10:00:00.000Z",
+            .start_time = 1739610000000, // 2026-02-15T10:00:00Z
+            .end_time = 1739628000000, // 2026-02-15T15:00:00Z
+            .actual_end_time = 1739617200000, // 2026-02-15T12:00:00Z
+            .is_active = false,
+            .is_gap = false,
+            .entry_count = 5,
+            .input_tokens = 5000,
+            .output_tokens = 1000,
+            .cache_creation_tokens = 200,
+            .cache_read_tokens = 800,
+            .cost_usd = 0.50,
+            .models = &models,
+            .burn_rate = null,
+            .projection = null,
+        },
+    };
+
+    const output = try writeToString(writeBlocksTable, .{ &blocks, @as(?u64, null), @as(i32, 0) });
+    defer testing.allocator.free(output);
+
+    // Has block columns
+    try testing.expect(std.mem.indexOf(u8, output, "Block Start") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "Duration") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "Models") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "Tokens") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "Cost") != null);
+    // No % column without token_limit
+    try testing.expect(std.mem.indexOf(u8, output, " % ") == null);
+    // Has formatted data
+    try testing.expect(std.mem.indexOf(u8, output, "7,000") != null); // total tokens
+    try testing.expect(std.mem.indexOf(u8, output, "$0.50") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "opus") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "2h") != null); // 2 hour duration
+}
+
+test "writeBlocksTable: with gap and active block" {
+    const models = [_][]const u8{"sonnet"};
+    const blocks = [_]types.SessionBlock{
+        .{
+            .id = "gap",
+            .start_time = 1739600000000,
+            .end_time = 1739610000000,
+            .actual_end_time = null,
+            .is_active = false,
+            .is_gap = true,
+            .entry_count = 0,
+            .input_tokens = 0,
+            .output_tokens = 0,
+            .cache_creation_tokens = 0,
+            .cache_read_tokens = 0,
+            .cost_usd = 0.0,
+            .models = &.{},
+            .burn_rate = null,
+            .projection = null,
+        },
+        .{
+            .id = "2026-02-15T12:00:00.000Z",
+            .start_time = 1739617200000,
+            .end_time = 1739635200000,
+            .actual_end_time = 1739621700000,
+            .is_active = true,
+            .is_gap = false,
+            .entry_count = 10,
+            .input_tokens = 3000,
+            .output_tokens = 500,
+            .cache_creation_tokens = 100,
+            .cache_read_tokens = 400,
+            .cost_usd = 0.30,
+            .models = &models,
+            .burn_rate = null,
+            .projection = null,
+        },
+    };
+
+    const output = try writeToString(writeBlocksTable, .{ &blocks, @as(?u64, null), @as(i32, 0) });
+    defer testing.allocator.free(output);
+
+    // Has gap indicator
+    try testing.expect(std.mem.indexOf(u8, output, "gap)") != null);
+    // Has ACTIVE indicator
+    try testing.expect(std.mem.indexOf(u8, output, "ACTIVE") != null);
+}
+
+test "writeBlocksTable: with token limit shows percentage column" {
+    const models = [_][]const u8{"opus"};
+    const blocks = [_]types.SessionBlock{
+        .{
+            .id = "2026-02-15T10:00:00.000Z",
+            .start_time = 1739610000000,
+            .end_time = 1739628000000,
+            .actual_end_time = 1739617200000,
+            .is_active = false,
+            .is_gap = false,
+            .entry_count = 5,
+            .input_tokens = 25000,
+            .output_tokens = 5000,
+            .cache_creation_tokens = 1000,
+            .cache_read_tokens = 4000,
+            .cost_usd = 2.50,
+            .models = &models,
+            .burn_rate = null,
+            .projection = null,
+        },
+    };
+
+    const output = try writeToString(writeBlocksTable, .{ &blocks, @as(?u64, 100000), @as(i32, 0) });
+    defer testing.allocator.free(output);
+
+    // Has % column header
+    try testing.expect(std.mem.indexOf(u8, output, "%") != null);
+    // 35000 out of 100000 = 35%
+    try testing.expect(std.mem.indexOf(u8, output, "35%") != null);
 }
