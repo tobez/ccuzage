@@ -41,6 +41,9 @@ const help_text =
     \\  --session-length N  Custom block duration (hours, default: 5)
     \\  --token-limit N     Token quota warning threshold
     \\
+    \\Statusline-specific:
+    \\  -B, --visual-burn-rate MODE  Burn rate display: off, emoji, text, emoji-text (default: off)
+    \\
     \\General:
     \\  --version           Print version and exit
     \\  --help              Print this help and exit
@@ -186,7 +189,7 @@ pub fn main() !void {
 
     // Statusline reads from stdin, not from usage data files
     if (opts.command == .statusline) {
-        statusline_mod.runStatusline(allocator) catch {
+        statusline_mod.runStatusline(allocator, tz_offset, opts.session_length, opts.burn_rate_visual) catch {
             try stderr_print("Error: statusline failed\n");
             std.process.exit(1);
         };

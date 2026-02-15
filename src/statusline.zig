@@ -56,20 +56,6 @@ pub fn parseStatuslineInput(allocator: std.mem.Allocator, input: []const u8) !st
     };
 }
 
-pub fn formatStatusline(allocator: std.mem.Allocator, input: StatuslineInput) ![]u8 {
-    if (input.context_window_size == 0) {
-        return std.fmt.allocPrint(allocator, "{s} | ${d:.4} | ? ctx", .{
-            input.model_display_name,
-            input.session_cost_usd,
-        });
-    }
-    const pct = @as(f64, @floatFromInt(input.context_tokens)) / @as(f64, @floatFromInt(input.context_window_size)) * 100.0;
-    return std.fmt.allocPrint(allocator, "{s} | ${d:.4} | {d:.0}% ctx", .{
-        input.model_display_name,
-        input.session_cost_usd,
-        pct,
-    });
-}
 
 fn formatCurrency(buf: []u8, amount: f64) []u8 {
     return std.fmt.bufPrint(buf, "${d:.2}", .{amount}) catch buf[0..0];
@@ -316,14 +302,43 @@ fn loadTodayData(allocator: std.mem.Allocator, tz_offset: i32, session_length: u
     };
 }
 
-pub fn runStatusline(allocator: std.mem.Allocator) !void {
+pub fn runStatusline(
+    allocator: std.mem.Allocator,
+    tz_offset: i32,
+    session_length: u32,
+    burn_rate_visual: types.BurnRateVisual,
+) !void {
     const input = try std.fs.File.stdin().readToEndAlloc(allocator, 1024 * 1024);
     defer allocator.free(input);
 
     const result = try parseStatuslineInput(allocator, input);
     defer result.parsed.deinit();
-    const output = try formatStatusline(allocator, result.value);
-    defer allocator.free(output);
+    const parsed = result.value;
+
+    // Load today's cost and active block info (non-fatal on error)
+    const today = loadTodayData(allocator, tz_offset, session_length) catch TodayData{
+        .today_cost = parsed.session_cost_usd,
+        .block_cost = null,
+        .remaining_minutes = null,
+        .burn_rate_cost_per_hour = null,
+        .io_tokens_per_minute = null,
+    };
+
+    const data = StatuslineData{
+        .model_display_name = parsed.model_display_name,
+        .session_cost = parsed.session_cost_usd,
+        .today_cost = today.today_cost,
+        .block_cost = today.block_cost,
+        .remaining_minutes = today.remaining_minutes,
+        .burn_rate_cost_per_hour = today.burn_rate_cost_per_hour,
+        .io_tokens_per_minute = today.io_tokens_per_minute,
+        .context_tokens = parsed.context_tokens,
+        .context_window_size = parsed.context_window_size,
+        .burn_rate_visual = burn_rate_visual,
+    };
+
+    var buf: [512]u8 = undefined;
+    const output = formatRichStatusline(&buf, data);
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -362,31 +377,6 @@ test "parseStatuslineInput: parse minimal input with required fields only" {
     try std.testing.expectEqual(@as(u64, 200000), result.value.context_window_size);
 }
 
-test "formatStatusline: formats output correctly" {
-    const input = StatuslineInput{
-        .model_id = "claude-sonnet-4-20250514",
-        .model_display_name = "Sonnet 4",
-        .session_cost_usd = 0.056,
-        .context_tokens = 42500,
-        .context_window_size = 200000,
-    };
-    const result = try formatStatusline(std.testing.allocator, input);
-    defer std.testing.allocator.free(result);
-    try std.testing.expectEqualStrings("Sonnet 4 | $0.0560 | 21% ctx", result);
-}
-
-test "formatStatusline: zero context window shows question mark" {
-    const input = StatuslineInput{
-        .model_id = "claude-opus-4",
-        .model_display_name = "Opus 4",
-        .session_cost_usd = 2.5,
-        .context_tokens = 1000,
-        .context_window_size = 0,
-    };
-    const result = try formatStatusline(std.testing.allocator, input);
-    defer std.testing.allocator.free(result);
-    try std.testing.expectEqualStrings("Opus 4 | $2.5000 | ? ctx", result);
-}
 
 test "formatCurrency: typical amount" {
     var buf: [32]u8 = undefined;
