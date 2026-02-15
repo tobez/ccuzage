@@ -410,4 +410,5 @@ test {
     _ = @import("json_output.zig");
     _ = @import("blocks.zig");
     _ = @import("statusline.zig");
+    _ = @import("integration_test.zig");
 }
