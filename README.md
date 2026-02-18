@@ -12,8 +12,8 @@ Written in Zig. Single static binary, no runtime dependencies.
 ## Why
 
 [ccusage](https://github.com/syakoo/ccusage) is a Node.js tool that does the
-same thing. It works well but takes 10-15 seconds to start up due to the
-Node.js runtime overhead. blazing produces the same reports in about 1 second.
+same thing. It works well but takes 10-15 seconds to produce a report for a
+month of data. blazing produces the same reports in about 1 second.
 
 This project was built as an experiment in rewriting a Node.js CLI tool in Zig
 to see how far the performance gap goes when the workload is I/O-bound JSONL
