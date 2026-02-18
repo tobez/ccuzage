@@ -38,7 +38,6 @@ Different:
 
 - Zig instead of Node.js — single 479KB binary, ~1s startup
 - No npm/npx/bunx required
-- `statusline` command for Claude Code status bar integration
 - Column detail levels (`--columns min/mid/full`)
 - Claude Code only — no multi-tool support
 
