@@ -22,8 +22,8 @@ parsing and aggregation.
 ## ccusage compatibility
 
 blazing aims to match ccusage's output format and feature set for Claude Code
-analysis. It does not support ccusage's other tools (Codex, OpenCode, Amp,
-Pi-Agent).
+analysis. It does not currently support ccusage's other tools (Codex, OpenCode,
+Amp, Pi-Agent).
 
 Matching:
 
@@ -68,6 +68,10 @@ Run `blazing --help` for all options.
 zig build -Doptimize=ReleaseFast
 cp zig-out/bin/blazing ~/.local/bin/
 ```
+
+## Contributing
+
+Contributions and patches are welcome.
 
 ## Credits
 
