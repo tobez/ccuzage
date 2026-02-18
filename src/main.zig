@@ -1,4 +1,4 @@
-// ABOUTME: Entry point for the blazing CLI tool.
+// ABOUTME: Entry point for the ccuzage CLI tool.
 // ABOUTME: Parses command-line flags and dispatches to the appropriate action.
 const std = @import("std");
 const types = @import("types.zig");
@@ -11,12 +11,12 @@ const statusline_mod = @import("statusline.zig");
 const table_output = @import("table_output.zig");
 const pricing = @import("pricing.zig");
 
-const version = "blazing v0.1.0";
+const version = "ccuzage v0.1.0";
 
 const help_text =
-    \\blazing - Claude Code usage analytics
+    \\ccuzage - Claude Code usage analytics
     \\
-    \\Usage: blazing [command] [options]
+    \\Usage: ccuzage [command] [options]
     \\
     \\Commands:
     \\  daily      Daily token usage and costs (default)

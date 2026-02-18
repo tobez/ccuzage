@@ -160,7 +160,7 @@ const litellm_url = "https://raw.githubusercontent.com/BerriAI/litellm/main/mode
 const cache_filename = "litellm_prices.json";
 const cache_max_age_ns: i128 = 3600 * std.time.ns_per_s; // 1 hour
 
-/// Returns the cache directory path: $XDG_CACHE_HOME/blazing or ~/.cache/blazing.
+/// Returns the cache directory path: $XDG_CACHE_HOME/ccuzage or ~/.cache/ccuzage.
 /// Caller owns the returned memory.
 fn getCacheDir(allocator: std.mem.Allocator) ![]const u8 {
     const cache_home = std.process.getEnvVarOwned(allocator, "XDG_CACHE_HOME") catch |err| switch (err) {
@@ -172,7 +172,7 @@ fn getCacheDir(allocator: std.mem.Allocator) ![]const u8 {
         else => return err,
     };
     defer allocator.free(cache_home);
-    return std.fs.path.join(allocator, &.{ cache_home, "blazing" });
+    return std.fs.path.join(allocator, &.{ cache_home, "ccuzage" });
 }
 
 /// Check whether the cache file is fresh (mtime < 1 hour ago).
@@ -542,11 +542,11 @@ test "parseLiteLLMJson: empty input returns error" {
 // Cache management tests
 // =============================================================================
 
-test "getCacheDir: returns valid path ending in blazing" {
+test "getCacheDir: returns valid path ending in ccuzage" {
     const dir = try getCacheDir(std.testing.allocator);
     defer std.testing.allocator.free(dir);
-    try std.testing.expect(std.mem.endsWith(u8, dir, "/blazing"));
-    try std.testing.expect(dir.len > "/blazing".len);
+    try std.testing.expect(std.mem.endsWith(u8, dir, "/ccuzage"));
+    try std.testing.expect(dir.len > "/ccuzage".len);
 }
 
 test "isCacheFresh: fresh file returns true" {

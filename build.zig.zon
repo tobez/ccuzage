@@ -1,7 +1,7 @@
 .{
-    .name = .blazing,
+    .name = .ccuzage,
     .version = "0.1.0",
-    .fingerprint = 0x310d11eb74ce9089,
+    .fingerprint = 0xc29312153698bf22,
     .minimum_zig_version = "0.15.0",
     .paths = .{
         "build.zig",

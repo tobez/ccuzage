@@ -1,4 +1,4 @@
-// ABOUTME: Build configuration for the blazing executable.
+// ABOUTME: Build configuration for the ccuzage executable.
 // ABOUTME: Defines compilation targets, install artifacts, and test steps.
 const std = @import("std");
 
@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const exe = b.addExecutable(.{
-        .name = "blazing",
+        .name = "ccuzage",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
-    const run_step = b.step("run", "Run blazing");
+    const run_step = b.step("run", "Run ccuzage");
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());

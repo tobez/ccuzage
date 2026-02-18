@@ -1,4 +1,4 @@
-// ABOUTME: Core data structures used throughout the blazing CLI tool.
+// ABOUTME: Core data structures used throughout the ccuzage CLI tool.
 // ABOUTME: Defines types for token usage entries, aggregation, sessions, blocks, and CLI options.
 const std = @import("std");
 
