@@ -164,7 +164,11 @@ pub fn parseArgs(args: []const []const u8) ParseError!types.CliOptions {
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const allocator = init.gpa;
+    // Use the process-global allocator rather than init.gpa: this is a short-lived
+    // CLI that intentionally does not free its bulk allocations, relying on process
+    // exit to reclaim. init.gpa is a leak-checking allocator in debug builds, whose
+    // exit-time scan over those allocations is pathologically slow on large datasets.
+    const allocator = std.heap.smp_allocator;
     const env = init.environ_map;
 
     var stdout_buffer: [4096]u8 = undefined;
