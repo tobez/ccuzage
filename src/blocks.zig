@@ -31,7 +31,7 @@ pub fn identifyBlocks(
     }.cmp);
 
     // Group entries into blocks
-    var block_groups: std.ArrayList(BlockGroup) = .{};
+    var block_groups: std.ArrayList(BlockGroup) = .empty;
     defer {
         for (block_groups.items) |*bg| bg.deinit(allocator);
         block_groups.deinit(allocator);
@@ -54,7 +54,7 @@ pub fn identifyBlocks(
     try block_groups.append(allocator, current_group);
 
     // Build session blocks with gap insertion
-    var result: std.ArrayList(types.SessionBlock) = .{};
+    var result: std.ArrayList(types.SessionBlock) = .empty;
     errdefer {
         for (result.items) |*block| freeBlock(allocator, block);
         result.deinit(allocator);
@@ -88,7 +88,7 @@ pub fn freeBlock(allocator: std.mem.Allocator, block: *types.SessionBlock) void 
 /// Returns a new slice containing only blocks where is_active is true.
 /// Caller owns the returned slice (but not the block contents, which are borrowed).
 pub fn filterActive(allocator: std.mem.Allocator, blocks_slice: []const types.SessionBlock) ![]const types.SessionBlock {
-    var list: std.ArrayList(types.SessionBlock) = .{};
+    var list: std.ArrayList(types.SessionBlock) = .empty;
     errdefer list.deinit(allocator);
 
     for (blocks_slice) |block| {
@@ -106,7 +106,7 @@ pub fn filterActive(allocator: std.mem.Allocator, blocks_slice: []const types.Se
 pub fn filterRecent(allocator: std.mem.Allocator, blocks_slice: []const types.SessionBlock, now_ms: i64, days: u32) ![]const types.SessionBlock {
     const cutoff = now_ms - @as(i64, days) * 24 * 60 * 60 * 1000;
 
-    var list: std.ArrayList(types.SessionBlock) = .{};
+    var list: std.ArrayList(types.SessionBlock) = .empty;
     errdefer list.deinit(allocator);
 
     for (blocks_slice) |block| {
@@ -155,7 +155,7 @@ const BlockGroup = struct {
             .cache_creation_tokens = 0,
             .cache_read_tokens = 0,
             .cost_usd = 0.0,
-            .models = .{},
+            .models = .empty,
         };
     }
 

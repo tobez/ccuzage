@@ -235,8 +235,8 @@ const TodayData = struct {
     io_tokens_per_minute: ?f64,
 };
 
-fn loadTodayData(allocator: std.mem.Allocator, tz_offset: i32, session_length: u32) !TodayData {
-    const now_ms = std.time.milliTimestamp();
+fn loadTodayData(io: std.Io, allocator: std.mem.Allocator, env: *const std.process.Environ.Map, tz_offset: i32, session_length: u32) !TodayData {
+    const now_ms: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_ms));
 
     // Compute today's YYYYMMDD string
     const daily_str = date.formatDaily(now_ms, tz_offset);
@@ -250,7 +250,7 @@ fn loadTodayData(allocator: std.mem.Allocator, tz_offset: i32, session_length: u
         .since_cutoff_ns = @as(i128, utc_since_ms) * 1_000_000,
     };
 
-    const all_entries = try loader.loadAllEntries(allocator, time_filter);
+    const all_entries = try loader.loadAllEntries(io, allocator, env, time_filter);
 
     // Filter to today only
     const entries = try aggregate.filterByDateRange(
@@ -302,12 +302,16 @@ fn loadTodayData(allocator: std.mem.Allocator, tz_offset: i32, session_length: u
 }
 
 pub fn runStatusline(
+    io: std.Io,
     allocator: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
     tz_offset: i32,
     session_length: u32,
     burn_rate_visual: types.BurnRateVisual,
 ) !void {
-    const input = try std.fs.File.stdin().readToEndAlloc(allocator, 1024 * 1024);
+    var stdin_file = std.Io.File.stdin();
+    var stdin_reader = stdin_file.reader(io, &.{});
+    const input = try stdin_reader.interface.allocRemaining(allocator, .limited(1024 * 1024));
     defer allocator.free(input);
 
     const result = try parseStatuslineInput(allocator, input);
@@ -315,7 +319,7 @@ pub fn runStatusline(
     const parsed = result.value;
 
     // Load today's cost and active block info (non-fatal on error)
-    const today = loadTodayData(allocator, tz_offset, session_length) catch TodayData{
+    const today = loadTodayData(io, allocator, env, tz_offset, session_length) catch TodayData{
         .today_cost = parsed.session_cost_usd,
         .block_cost = null,
         .remaining_minutes = null,
@@ -342,7 +346,7 @@ pub fn runStatusline(
     const output = formatRichStatusline(&buf, data);
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     try stdout.print("{s}\n", .{output});
     try stdout.flush();

@@ -709,7 +709,7 @@ test "integration: zero-cost entries aggregate correctly" {
         try std.testing.expectApproxEqAbs(@as(f64, 0.0), blks[0].cost_usd, 0.001);
 
         try std.testing.expect(blks[0].burn_rate != null);
-    const br = blks[0].burn_rate.?;
+        const br = blks[0].burn_rate.?;
         // tokens_per_minute should be nonzero (450 tokens / 60 min = 7.5)
         try std.testing.expect(br.tokens_per_minute > 0.0);
         // cost_per_hour should be 0
