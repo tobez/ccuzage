@@ -30,3 +30,6 @@ replacements:
   - path: build.zig.zon
     find: '\.version = "[^"]+"'
     replace: '.version = "{{.VersionNoPrefix}}"'
+  - path: src/main.zig
+    find: 'const version = "ccuzage v[^"]+"'
+    replace: 'const version = "ccuzage v{{.VersionNoPrefix}}"'
