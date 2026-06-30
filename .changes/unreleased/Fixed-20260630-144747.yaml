@@ -1,3 +1,0 @@
-kind: Fixed
-body: CLAUDE_CONFIG_DIR now selects configs exclusively instead of merging the default directories
-time: 2026-06-30T14:47:47.428283+02:00

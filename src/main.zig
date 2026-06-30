@@ -11,7 +11,7 @@ const statusline_mod = @import("statusline.zig");
 const table_output = @import("table_output.zig");
 const pricing = @import("pricing.zig");
 
-const version = "ccuzage v0.1.0";
+const version = "ccuzage v0.2.0";
 
 const help_text =
     \\ccuzage - Claude Code usage analytics
