@@ -390,7 +390,7 @@ pub fn filterByDateRange(
     until: ?[]const u8,
     tz_offset_minutes: i32,
 ) ![]const types.UsageEntry {
-    var list: std.ArrayList(types.UsageEntry) = .{};
+    var list: std.ArrayList(types.UsageEntry) = .empty;
     errdefer list.deinit(allocator);
 
     for (entries) |entry| {

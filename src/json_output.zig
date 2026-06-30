@@ -4,7 +4,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const date = @import("date.zig");
 
-const Writer = std.io.Writer;
+const Writer = std.Io.Writer;
 
 /// Writes a JSON-escaped string (with surrounding quotes) to the writer.
 fn writeJsonString(w: *Writer, s: []const u8) Writer.Error!void {

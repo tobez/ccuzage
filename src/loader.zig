@@ -22,7 +22,7 @@ pub fn loadEntriesFromLines(
     project: []const u8,
     shared_seen: ?*std.StringHashMap(void),
 ) ![]types.UsageEntry {
-    var result: std.ArrayList(types.UsageEntry) = .{};
+    var result: std.ArrayList(types.UsageEntry) = .empty;
     errdefer {
         for (result.items) |e| {
             allocator.free(e.model);
@@ -107,23 +107,22 @@ pub fn extractProjectAndSession(path: []const u8) ?ProjectAndSession {
 
 /// Discovers all .jsonl files in Claude Code's data directories.
 /// Checks CLAUDE_CONFIG_DIR env var, then ~/.config/claude/projects/, then ~/.claude/projects/.
-pub fn discoverJsonlFiles(allocator: std.mem.Allocator) ![][]const u8 {
-    var files: std.ArrayList([]const u8) = .{};
+pub fn discoverJsonlFiles(io: std.Io, allocator: std.mem.Allocator, env: *const std.process.Environ.Map) ![][]const u8 {
+    var files: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (files.items) |f| allocator.free(f);
         files.deinit(allocator);
     }
 
     // Collect candidate directories
-    var dirs_to_check: std.ArrayList([]const u8) = .{};
+    var dirs_to_check: std.ArrayList([]const u8) = .empty;
     defer {
         for (dirs_to_check.items) |d| allocator.free(d);
         dirs_to_check.deinit(allocator);
     }
 
     // 1. CLAUDE_CONFIG_DIR environment variable (comma-separated)
-    if (std.process.getEnvVarOwned(allocator, "CLAUDE_CONFIG_DIR")) |config_dir| {
-        defer allocator.free(config_dir);
+    if (env.get("CLAUDE_CONFIG_DIR")) |config_dir| {
         var it = std.mem.splitScalar(u8, config_dir, ',');
         while (it.next()) |part| {
             const trimmed = std.mem.trim(u8, part, " ");
@@ -131,36 +130,35 @@ pub fn discoverJsonlFiles(allocator: std.mem.Allocator) ![][]const u8 {
             const dir_path = try std.fs.path.join(allocator, &.{ trimmed, "projects" });
             try dirs_to_check.append(allocator, dir_path);
         }
-    } else |_| {}
+    }
 
     // 2. ~/.config/claude/projects/
-    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
-        defer allocator.free(home);
+    if (env.get("HOME")) |home| {
         const config_projects = try std.fs.path.join(allocator, &.{ home, ".config", "claude", "projects" });
         try dirs_to_check.append(allocator, config_projects);
 
         // 3. ~/.claude/projects/
         const dot_claude_projects = try std.fs.path.join(allocator, &.{ home, ".claude", "projects" });
         try dirs_to_check.append(allocator, dot_claude_projects);
-    } else |_| {}
+    }
 
     // Walk each directory
     for (dirs_to_check.items) |dir_path| {
-        try collectJsonlFiles(allocator, dir_path, &files);
+        try collectJsonlFiles(io, allocator, dir_path, &files);
     }
 
     return files.toOwnedSlice(allocator);
 }
 
 /// Recursively collects .jsonl files from a directory.
-fn collectJsonlFiles(allocator: std.mem.Allocator, dir_path: []const u8, files: *std.ArrayList([]const u8)) !void {
-    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-    defer dir.close();
+fn collectJsonlFiles(io: std.Io, allocator: std.mem.Allocator, dir_path: []const u8, files: *std.ArrayList([]const u8)) !void {
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
 
     var walker = dir.walk(allocator) catch return;
     defer walker.deinit();
 
-    while (walker.next() catch null) |entry| {
+    while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".jsonl")) continue;
 
@@ -171,9 +169,10 @@ fn collectJsonlFiles(allocator: std.mem.Allocator, dir_path: []const u8, files: 
 }
 
 /// Get file birthtime in nanoseconds. Returns null on platforms that don't support it.
-fn getFileBirthTimeNs(file: std.fs.File) ?i128 {
+fn getFileBirthTimeNs(file: std.Io.File) ?i128 {
     if (comptime builtin.os.tag.isDarwin()) {
-        const stat = posix.fstat(file.handle) catch return null;
+        var stat: std.c.Stat = undefined;
+        if (std.c.fstat(file.handle, &stat) != 0) return null;
         const btime = stat.birthtime();
         return @as(i128, btime.sec) * 1_000_000_000 + btime.nsec;
     }
@@ -182,12 +181,12 @@ fn getFileBirthTimeNs(file: std.fs.File) ?i128 {
 }
 
 /// Check if a file should be skipped based on its filesystem timestamps.
-fn shouldSkipFile(file: std.fs.File, filter: FileTimeFilter) bool {
+fn shouldSkipFile(io: std.Io, file: std.Io.File, filter: FileTimeFilter) bool {
     if (filter.since_cutoff_ns == null and filter.until_cutoff_ns == null) return false;
 
     if (filter.since_cutoff_ns) |cutoff| {
-        const stat = file.stat() catch return false;
-        if (stat.mtime < cutoff) return true;
+        const stat = file.stat(io) catch return false;
+        if (@as(i128, stat.mtime.nanoseconds) < cutoff) return true;
     }
 
     if (filter.until_cutoff_ns) |cutoff| {
@@ -202,14 +201,14 @@ fn shouldSkipFile(file: std.fs.File, filter: FileTimeFilter) bool {
 /// Loads all usage entries from all discovered JSONL files.
 /// Deduplication is global across all files.
 /// When time_filter is provided, files are skipped based on mtime/birthtime.
-pub fn loadAllEntries(allocator: std.mem.Allocator, time_filter: FileTimeFilter) ![]types.UsageEntry {
-    const file_paths = try discoverJsonlFiles(allocator);
+pub fn loadAllEntries(io: std.Io, allocator: std.mem.Allocator, env: *const std.process.Environ.Map, time_filter: FileTimeFilter) ![]types.UsageEntry {
+    const file_paths = try discoverJsonlFiles(io, allocator, env);
     defer {
         for (file_paths) |p| allocator.free(p);
         allocator.free(file_paths);
     }
 
-    var all_entries: std.ArrayList(types.UsageEntry) = .{};
+    var all_entries: std.ArrayList(types.UsageEntry) = .empty;
     errdefer {
         for (all_entries.items) |e| {
             allocator.free(e.model);
@@ -231,17 +230,18 @@ pub fn loadAllEntries(allocator: std.mem.Allocator, time_filter: FileTimeFilter)
         const ps = extractProjectAndSession(file_path) orelse continue;
 
         // Read the file
-        const file = std.fs.openFileAbsolute(file_path, .{}) catch continue;
-        defer file.close();
+        var file = std.Io.Dir.openFileAbsolute(io, file_path, .{}) catch continue;
+        defer file.close(io);
 
         // Skip files outside the date range based on filesystem timestamps
-        if (shouldSkipFile(file, time_filter)) continue;
+        if (shouldSkipFile(io, file, time_filter)) continue;
 
-        const contents = file.readToEndAlloc(allocator, 256 * 1024 * 1024) catch continue;
+        var file_reader = file.reader(io, &.{});
+        const contents = file_reader.interface.allocRemaining(allocator, .limited(256 * 1024 * 1024)) catch continue;
         defer allocator.free(contents);
 
         // Split into lines
-        var line_list: std.ArrayList([]const u8) = .{};
+        var line_list: std.ArrayList([]const u8) = .empty;
         defer line_list.deinit(allocator);
 
         var line_iter = std.mem.splitScalar(u8, contents, '\n');
@@ -435,7 +435,7 @@ test "file reading and parsing integration" {
     defer tmp.cleanup();
 
     // Create nested directory for the JSONL file
-    tmp.dir.makePath("projects/testproj") catch unreachable;
+    tmp.dir.createDirPath(std.testing.io, "projects/testproj") catch unreachable;
 
     // Write a JSONL file with a duplicate and a unique entry
     const line1 =
@@ -451,17 +451,17 @@ test "file reading and parsing integration" {
 
     const file_content = line1 ++ "\n" ++ line2 ++ "\n" ++ line1_dup ++ "\n";
 
-    tmp.dir.writeFile(.{
+    tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "projects/testproj/sess-abc.jsonl",
         .data = file_content,
     }) catch unreachable;
 
     // Read the file back and verify the pipeline
-    const contents = try tmp.dir.readFileAlloc(allocator, "projects/testproj/sess-abc.jsonl", 1024 * 1024);
+    const contents = try tmp.dir.readFileAlloc(std.testing.io, "projects/testproj/sess-abc.jsonl", allocator, .limited(1024 * 1024));
     defer allocator.free(contents);
 
     // Split into lines
-    var line_list: std.ArrayList([]const u8) = .{};
+    var line_list: std.ArrayList([]const u8) = .empty;
     defer line_list.deinit(allocator);
 
     var line_iter = std.mem.splitScalar(u8, contents, '\n');

@@ -5,7 +5,7 @@ const types = @import("types.zig");
 const statusline = @import("statusline.zig");
 const date = @import("date.zig");
 
-const Writer = std.io.Writer;
+const Writer = std.Io.Writer;
 
 pub const MAX_COLS = 10;
 pub const MAX_ROWS = 400;
@@ -282,18 +282,18 @@ fn addAggregatedRow(table: *Table, pool: *CellPool, column_level: types.ColumnLe
     const total = in_tok + out_tok + cache_create + cache_read;
     switch (column_level) {
         .full => table.addRow(&.{
-            period, model,
-            pool.fmtTokens(in_tok), pool.fmtTokens(out_tok),
+            period,                       model,
+            pool.fmtTokens(in_tok),       pool.fmtTokens(out_tok),
             pool.fmtTokens(cache_create), pool.fmtTokens(cache_read),
-            pool.fmtTokens(total), pool.fmtCurrency(cost),
+            pool.fmtTokens(total),        pool.fmtCurrency(cost),
         }),
         .mid => table.addRow(&.{
-            period, model,
-            pool.fmtTokens(in_tok), pool.fmtTokens(out_tok),
+            period,                     model,
+            pool.fmtTokens(in_tok),     pool.fmtTokens(out_tok),
             pool.fmtTokens(cache_read), pool.fmtCurrency(cost),
         }),
         .min => table.addRow(&.{
-            period, model,
+            period,                model,
             pool.fmtTokens(total), pool.fmtCurrency(cost),
         }),
     }

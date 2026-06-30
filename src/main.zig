@@ -162,13 +162,25 @@ pub fn parseArgs(args: []const []const u8) ParseError!types.CliOptions {
     return opts;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
+    const env = init.environ_map;
+
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    const args = try std.process.argsAlloc(std.heap.smp_allocator);
-    defer std.process.argsFree(std.heap.smp_allocator, args);
+    var arg_list: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (arg_list.items) |a| allocator.free(a);
+        arg_list.deinit(allocator);
+    }
+    var arg_it = std.process.Args.Iterator.init(init.minimal.args);
+    while (arg_it.next()) |a| {
+        try arg_list.append(allocator, try allocator.dupe(u8, a));
+    }
+    const args = arg_list.items;
 
     // Check for --version and --help before full parsing
     for (args[1..]) |arg| {
@@ -185,7 +197,7 @@ pub fn main() !void {
 
     const opts = parseArgs(args[1..]) catch |err| {
         var stderr_buffer: [4096]u8 = undefined;
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
         const stderr = &stderr_writer.interface;
         switch (err) {
             ParseError.UnknownFlag => try stderr.print("Error: unknown flag\n", .{}),
@@ -197,14 +209,13 @@ pub fn main() !void {
     };
 
     const tz_offset: i32 = opts.timezone_offset_minutes orelse date.getLocalTimezoneOffset();
-    const allocator = std.heap.smp_allocator;
 
-    pricing.initDynamic(allocator);
+    pricing.initDynamic(io, allocator, env);
 
     // Statusline reads from stdin, not from usage data files
     if (opts.command == .statusline) {
-        statusline_mod.runStatusline(allocator, tz_offset, opts.session_length, opts.burn_rate_visual) catch {
-            try stderr_print("Error: statusline failed\n");
+        statusline_mod.runStatusline(io, allocator, env, tz_offset, opts.session_length, opts.burn_rate_visual) catch {
+            try stderr_print(io, "Error: statusline failed\n");
             std.process.exit(1);
         };
         return;
@@ -228,8 +239,8 @@ pub fn main() !void {
     }
 
     // Load all entries, skipping files outside the date range
-    const all_entries = loader.loadAllEntries(allocator, time_filter) catch {
-        try stderr_print("Error: failed to load usage data\n");
+    const all_entries = loader.loadAllEntries(io, allocator, env, time_filter) catch {
+        try stderr_print(io, "Error: failed to load usage data\n");
         std.process.exit(1);
     };
 
@@ -241,23 +252,23 @@ pub fn main() !void {
         opts.until,
         tz_offset,
     ) catch {
-        try stderr_print("Error: failed to filter by date range\n");
+        try stderr_print(io, "Error: failed to filter by date range\n");
         std.process.exit(1);
     };
 
     // Filter by project (if --project set)
     const entries = if (opts.project) |project_name| blk: {
-        var filtered: std.ArrayList(types.UsageEntry) = .{};
+        var filtered: std.ArrayList(types.UsageEntry) = .empty;
         for (date_filtered) |entry| {
             if (std.mem.eql(u8, entry.project, project_name)) {
                 filtered.append(allocator, entry) catch {
-                    try stderr_print("Error: failed to filter by project\n");
+                    try stderr_print(io, "Error: failed to filter by project\n");
                     std.process.exit(1);
                 };
             }
         }
         break :blk filtered.toOwnedSlice(allocator) catch {
-            try stderr_print("Error: failed to filter by project\n");
+            try stderr_print(io, "Error: failed to filter by project\n");
             std.process.exit(1);
         };
     } else date_filtered;
@@ -271,7 +282,7 @@ pub fn main() !void {
                 .weekly => aggregate.aggregateWeekly(allocator, entries, tz_offset, 0, opts.instances),
                 else => unreachable,
             } catch {
-                try stderr_print("Error: aggregation failed\n");
+                try stderr_print(io, "Error: aggregation failed\n");
                 std.process.exit(1);
             };
             aggregate.sortAggregated(aggregated, opts.order);
@@ -285,7 +296,7 @@ pub fn main() !void {
                         .weekly => json_output.projectGroupedToJson(allocator, "weekly", "week", aggregated, totals),
                         else => unreachable,
                     } catch {
-                        try stderr_print("Error: JSON serialization failed\n");
+                        try stderr_print(io, "Error: JSON serialization failed\n");
                         std.process.exit(1);
                     }
                 else
@@ -295,7 +306,7 @@ pub fn main() !void {
                         .weekly => json_output.reportToJson(allocator, "weekly", "week", aggregated, totals),
                         else => unreachable,
                     } catch {
-                        try stderr_print("Error: JSON serialization failed\n");
+                        try stderr_print(io, "Error: JSON serialization failed\n");
                         std.process.exit(1);
                     };
                 try stdout.print("{s}\n", .{json_str});
@@ -308,12 +319,12 @@ pub fn main() !void {
                 };
                 if (opts.instances) {
                     table_output.writeProjectGroupedTable(stdout, aggregated, totals, opts.column_level, period_label, opts.breakdown) catch {
-                        try stderr_print("Error: table rendering failed\n");
+                        try stderr_print(io, "Error: table rendering failed\n");
                         std.process.exit(1);
                     };
                 } else {
                     table_output.writeAggregatedTable(stdout, aggregated, totals, opts.column_level, period_label, opts.breakdown) catch {
-                        try stderr_print("Error: table rendering failed\n");
+                        try stderr_print(io, "Error: table rendering failed\n");
                         std.process.exit(1);
                     };
                 }
@@ -321,7 +332,7 @@ pub fn main() !void {
         },
         .session => {
             const sessions = aggregate.aggregateSession(allocator, entries, tz_offset) catch {
-                try stderr_print("Error: session aggregation failed\n");
+                try stderr_print(io, "Error: session aggregation failed\n");
                 std.process.exit(1);
             };
             aggregate.sortSessions(sessions, opts.order);
@@ -329,46 +340,46 @@ pub fn main() !void {
 
             if (opts.json) {
                 const json_str = json_output.sessionToJson(allocator, sessions, totals) catch {
-                    try stderr_print("Error: JSON serialization failed\n");
+                    try stderr_print(io, "Error: JSON serialization failed\n");
                     std.process.exit(1);
                 };
                 try stdout.print("{s}\n", .{json_str});
             } else {
                 table_output.writeSessionTable(stdout, sessions, totals, opts.column_level, opts.breakdown) catch {
-                    try stderr_print("Error: table rendering failed\n");
+                    try stderr_print(io, "Error: table rendering failed\n");
                     std.process.exit(1);
                 };
             }
         },
         .blocks => {
-            const now_ms = std.time.milliTimestamp();
+            const now_ms: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_ms));
             var all_blocks = blocks_mod.identifyBlocks(allocator, entries, opts.session_length, now_ms) catch {
-                try stderr_print("Error: block identification failed\n");
+                try stderr_print(io, "Error: block identification failed\n");
                 std.process.exit(1);
             };
 
             // Apply --active or --recent filters
             if (opts.active) {
                 all_blocks = @constCast(blocks_mod.filterActive(allocator, all_blocks) catch {
-                    try stderr_print("Error: block filtering failed\n");
+                    try stderr_print(io, "Error: block filtering failed\n");
                     std.process.exit(1);
                 });
             } else if (opts.recent) {
                 all_blocks = @constCast(blocks_mod.filterRecent(allocator, all_blocks, now_ms, 3) catch {
-                    try stderr_print("Error: block filtering failed\n");
+                    try stderr_print(io, "Error: block filtering failed\n");
                     std.process.exit(1);
                 });
             }
 
             if (opts.json) {
                 const json_str = json_output.blocksToJson(allocator, all_blocks) catch {
-                    try stderr_print("Error: JSON serialization failed\n");
+                    try stderr_print(io, "Error: JSON serialization failed\n");
                     std.process.exit(1);
                 };
                 try stdout.print("{s}\n", .{json_str});
             } else {
                 table_output.writeBlocksTable(stdout, all_blocks, opts.token_limit, tz_offset) catch {
-                    try stderr_print("Error: table rendering failed\n");
+                    try stderr_print(io, "Error: table rendering failed\n");
                     std.process.exit(1);
                 };
             }
@@ -379,9 +390,9 @@ pub fn main() !void {
     try stdout.flush();
 }
 
-fn stderr_print(msg: []const u8) !void {
+fn stderr_print(io: std.Io, msg: []const u8) !void {
     var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
     try stderr.writeAll(msg);
     try stderr.flush();

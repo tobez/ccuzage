@@ -63,7 +63,7 @@ Run `ccuzage --help` for all options.
 > **Note:** Installation instructions are a work in progress.
 
 ```bash
-# Build from source (requires Zig 0.15+)
+# Build from source (requires Zig 0.16+)
 zig build -Doptimize=ReleaseFast
 cp zig-out/bin/ccuzage ~/.local/bin/
 ```

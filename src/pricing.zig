@@ -91,7 +91,7 @@ fn extractOptionalF64(buf: []const u8, obj_start: usize, key: []const u8) ?f64 {
 }
 
 pub fn parseLiteLLMJson(allocator: std.mem.Allocator, json: []const u8) ![]DynamicModelEntry {
-    var entries: std.ArrayList(DynamicModelEntry) = .{};
+    var entries: std.ArrayList(DynamicModelEntry) = .empty;
     errdefer {
         for (entries.items) |entry| {
             allocator.free(entry.name);
@@ -162,79 +162,78 @@ const cache_max_age_ns: i128 = 3600 * std.time.ns_per_s; // 1 hour
 
 /// Returns the cache directory path: $XDG_CACHE_HOME/ccuzage or ~/.cache/ccuzage.
 /// Caller owns the returned memory.
-fn getCacheDir(allocator: std.mem.Allocator) ![]const u8 {
-    const cache_home = std.process.getEnvVarOwned(allocator, "XDG_CACHE_HOME") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => blk: {
-            const home = try std.process.getEnvVarOwned(allocator, "HOME");
-            defer allocator.free(home);
-            break :blk try std.fs.path.join(allocator, &.{ home, ".cache" });
-        },
-        else => return err,
-    };
+fn getCacheDir(allocator: std.mem.Allocator, env: *const std.process.Environ.Map) ![]const u8 {
+    if (env.get("XDG_CACHE_HOME")) |cache_home| {
+        return std.fs.path.join(allocator, &.{ cache_home, "ccuzage" });
+    }
+    const home = env.get("HOME") orelse return error.EnvironmentVariableNotFound;
+    const cache_home = try std.fs.path.join(allocator, &.{ home, ".cache" });
     defer allocator.free(cache_home);
     return std.fs.path.join(allocator, &.{ cache_home, "ccuzage" });
 }
 
 /// Check whether the cache file is fresh (mtime < 1 hour ago).
-fn isCacheFresh(cache_path: []const u8) bool {
-    const file = std.fs.openFileAbsolute(cache_path, .{}) catch return false;
-    defer file.close();
-    const stat = file.stat() catch return false;
-    const now = std.time.nanoTimestamp();
-    return (now - stat.mtime) < cache_max_age_ns;
+fn isCacheFresh(io: std.Io, cache_path: []const u8) bool {
+    var file = std.Io.Dir.openFileAbsolute(io, cache_path, .{}) catch return false;
+    defer file.close(io);
+    const stat = file.stat(io) catch return false;
+    const now = std.Io.Timestamp.now(io, .real);
+    return (@as(i128, now.nanoseconds) - @as(i128, stat.mtime.nanoseconds)) < cache_max_age_ns;
 }
 
 /// Fetch URL to cache path using curl. Writes to a temp file then renames atomically.
-fn fetchToCache(allocator: std.mem.Allocator, cache_path: []const u8) !void {
+fn fetchToCache(io: std.Io, allocator: std.mem.Allocator, cache_path: []const u8) !void {
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{cache_path});
     defer allocator.free(tmp_path);
 
     const argv = [_][]const u8{ "curl", "-sf", "-m", "10", litellm_url, "-o", tmp_path };
-    var child = std.process.Child.init(&argv, allocator);
-    child.stderr_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    try child.spawn();
-    const term = try child.wait();
+    var child = try std.process.spawn(io, .{
+        .argv = &argv,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    const term = try child.wait(io);
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
-                std.fs.deleteFileAbsolute(tmp_path) catch {};
+                std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};
                 return error.FetchFailed;
             }
         },
         else => {
-            std.fs.deleteFileAbsolute(tmp_path) catch {};
+            std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};
             return error.FetchFailed;
         },
     }
 
-    std.fs.renameAbsolute(tmp_path, cache_path) catch {
-        std.fs.deleteFileAbsolute(tmp_path) catch {};
+    std.Io.Dir.renameAbsolute(tmp_path, cache_path, io) catch {
+        std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};
         return error.FetchFailed;
     };
 }
 
-fn readFileAbsolute(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    return file.readToEndAlloc(allocator, 16 * 1024 * 1024); // 16MB max
+fn readFileAbsolute(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+    var file_reader = file.reader(io, &.{});
+    return file_reader.interface.allocRemaining(allocator, .limited(16 * 1024 * 1024)); // 16MB max
 }
 
 var dynamic_state: ?struct { table: []DynamicModelEntry } = null;
 
 /// Load dynamic pricing from LiteLLM cache. All errors are non-fatal.
-pub fn initDynamic(allocator: std.mem.Allocator) void {
-    const cache_dir = getCacheDir(allocator) catch return;
+pub fn initDynamic(io: std.Io, allocator: std.mem.Allocator, env: *const std.process.Environ.Map) void {
+    const cache_dir = getCacheDir(allocator, env) catch return;
     defer allocator.free(cache_dir);
 
     // Ensure cache directory exists
     if (std.fs.path.dirname(cache_dir)) |parent| {
-        std.fs.makeDirAbsolute(parent) catch |err| switch (err) {
+        std.Io.Dir.createDirAbsolute(io, parent, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return,
         };
     }
-    std.fs.makeDirAbsolute(cache_dir) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(io, cache_dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return,
     };
@@ -242,14 +241,14 @@ pub fn initDynamic(allocator: std.mem.Allocator) void {
     const cache_path = std.fs.path.join(allocator, &.{ cache_dir, cache_filename }) catch return;
     defer allocator.free(cache_path);
 
-    const json = if (isCacheFresh(cache_path))
-        readFileAbsolute(allocator, cache_path) catch return
+    const json = if (isCacheFresh(io, cache_path))
+        readFileAbsolute(io, allocator, cache_path) catch return
     else blk: {
-        fetchToCache(allocator, cache_path) catch {
+        fetchToCache(io, allocator, cache_path) catch {
             // Fetch failed — try stale cache
-            break :blk readFileAbsolute(allocator, cache_path) catch return;
+            break :blk readFileAbsolute(io, allocator, cache_path) catch return;
         };
-        break :blk readFileAbsolute(allocator, cache_path) catch return;
+        break :blk readFileAbsolute(io, allocator, cache_path) catch return;
     };
     defer allocator.free(json);
 
@@ -543,7 +542,10 @@ test "parseLiteLLMJson: empty input returns error" {
 // =============================================================================
 
 test "getCacheDir: returns valid path ending in ccuzage" {
-    const dir = try getCacheDir(std.testing.allocator);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/home/test");
+    const dir = try getCacheDir(std.testing.allocator, &env);
     defer std.testing.allocator.free(dir);
     try std.testing.expect(std.mem.endsWith(u8, dir, "/ccuzage"));
     try std.testing.expect(dir.len > "/ccuzage".len);
@@ -552,15 +554,15 @@ test "getCacheDir: returns valid path ending in ccuzage" {
 test "isCacheFresh: fresh file returns true" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const file = try tmp.dir.createFile("test_cache.json", .{});
-    file.close();
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "test_cache.json");
+    var file = try tmp.dir.createFile(std.testing.io, "test_cache.json", .{});
+    file.close(std.testing.io);
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "test_cache.json", std.testing.allocator);
     defer std.testing.allocator.free(path);
-    try std.testing.expect(isCacheFresh(path));
+    try std.testing.expect(isCacheFresh(std.testing.io, path));
 }
 
 test "isCacheFresh: missing file returns false" {
-    try std.testing.expect(!isCacheFresh("/nonexistent/path/to/file.json"));
+    try std.testing.expect(!isCacheFresh(std.testing.io, "/nonexistent/path/to/file.json"));
 }
 
 // =============================================================================

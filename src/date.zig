@@ -177,15 +177,14 @@ pub fn filterDateToEpochMs(date_str: []const u8) ?i64 {
 pub fn dailyToFilterDate(daily: *const [10]u8) [8]u8 {
     return .{
         daily[0], daily[1], daily[2], daily[3],
-        daily[5], daily[6],
-        daily[8], daily[9],
+        daily[5], daily[6], daily[8], daily[9],
     };
 }
 
 /// Detect the system's local timezone offset in minutes from UTC.
 /// Uses the C library's localtime_r to read the system timezone.
 pub fn getLocalTimezoneOffset() i32 {
-    var now: libc.time_t = @intCast(std.time.timestamp());
+    var now: libc.time_t = libc.time(null);
     var tm: libc.struct_tm = undefined;
     _ = libc.localtime_r(&now, &tm);
     return @intCast(@divTrunc(tm.tm_gmtoff, 60));
