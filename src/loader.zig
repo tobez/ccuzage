@@ -114,40 +114,55 @@ pub fn discoverJsonlFiles(io: std.Io, allocator: std.mem.Allocator, env: *const 
         files.deinit(allocator);
     }
 
-    // Collect candidate directories
-    var dirs_to_check: std.ArrayList([]const u8) = .empty;
+    const dirs_to_check = try resolveDataDirs(allocator, env.get("CLAUDE_CONFIG_DIR"), env.get("HOME"));
     defer {
-        for (dirs_to_check.items) |d| allocator.free(d);
-        dirs_to_check.deinit(allocator);
+        for (dirs_to_check) |d| allocator.free(d);
+        allocator.free(dirs_to_check);
     }
 
-    // 1. CLAUDE_CONFIG_DIR environment variable (comma-separated)
-    if (env.get("CLAUDE_CONFIG_DIR")) |config_dir| {
+    // Walk each directory
+    for (dirs_to_check) |dir_path| {
+        try collectJsonlFiles(io, allocator, dir_path, &files);
+    }
+
+    return files.toOwnedSlice(allocator);
+}
+
+/// Resolves the ordered list of "projects" directories to scan.
+/// When CLAUDE_CONFIG_DIR is set, its comma-separated entries are used exclusively;
+/// the HOME defaults (~/.config/claude, ~/.claude) apply only when no config dir is given.
+/// Caller owns the returned slice and each path within it.
+fn resolveDataDirs(allocator: std.mem.Allocator, claude_config_dir: ?[]const u8, home: ?[]const u8) ![][]const u8 {
+    var dirs: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (dirs.items) |d| allocator.free(d);
+        dirs.deinit(allocator);
+    }
+
+    // CLAUDE_CONFIG_DIR is a comma-separated list of config roots.
+    if (claude_config_dir) |config_dir| {
         var it = std.mem.splitScalar(u8, config_dir, ',');
         while (it.next()) |part| {
             const trimmed = std.mem.trim(u8, part, " ");
             if (trimmed.len == 0) continue;
             const dir_path = try std.fs.path.join(allocator, &.{ trimmed, "projects" });
-            try dirs_to_check.append(allocator, dir_path);
+            try dirs.append(allocator, dir_path);
         }
     }
 
-    // 2. ~/.config/claude/projects/
-    if (env.get("HOME")) |home| {
-        const config_projects = try std.fs.path.join(allocator, &.{ home, ".config", "claude", "projects" });
-        try dirs_to_check.append(allocator, config_projects);
+    // HOME defaults apply only when CLAUDE_CONFIG_DIR yielded no directory:
+    // ~/.config/claude/projects/ then ~/.claude/projects/.
+    if (dirs.items.len == 0) {
+        if (home) |h| {
+            const config_projects = try std.fs.path.join(allocator, &.{ h, ".config", "claude", "projects" });
+            try dirs.append(allocator, config_projects);
 
-        // 3. ~/.claude/projects/
-        const dot_claude_projects = try std.fs.path.join(allocator, &.{ home, ".claude", "projects" });
-        try dirs_to_check.append(allocator, dot_claude_projects);
+            const dot_claude_projects = try std.fs.path.join(allocator, &.{ h, ".claude", "projects" });
+            try dirs.append(allocator, dot_claude_projects);
+        }
     }
 
-    // Walk each directory
-    for (dirs_to_check.items) |dir_path| {
-        try collectJsonlFiles(io, allocator, dir_path, &files);
-    }
-
-    return files.toOwnedSlice(allocator);
+    return dirs.toOwnedSlice(allocator);
 }
 
 /// Recursively collects .jsonl files from a directory.
@@ -365,6 +380,58 @@ test "loadEntriesFromLines - empty input returns empty result" {
     defer freeEntries(std.testing.allocator, entries);
 
     try std.testing.expectEqual(@as(usize, 0), entries.len);
+}
+
+fn freeDirs(allocator: std.mem.Allocator, dirs: [][]const u8) void {
+    for (dirs) |d| allocator.free(d);
+    allocator.free(dirs);
+}
+
+fn dirsContainSuffix(dirs: [][]const u8, suffix: []const u8) bool {
+    for (dirs) |d| {
+        if (std.mem.endsWith(u8, d, suffix)) return true;
+    }
+    return false;
+}
+
+test "resolveDataDirs - CLAUDE_CONFIG_DIR overrides HOME defaults" {
+    const allocator = std.testing.allocator;
+    const dirs = try resolveDataDirs(allocator, "/home/tobez/.claude-team", "/home/tobez");
+    defer freeDirs(allocator, dirs);
+
+    try std.testing.expectEqual(@as(usize, 1), dirs.len);
+    try std.testing.expectEqualStrings("/home/tobez/.claude-team/projects", dirs[0]);
+    try std.testing.expect(!dirsContainSuffix(dirs, "/.claude/projects"));
+    try std.testing.expect(!dirsContainSuffix(dirs, "/.config/claude/projects"));
+}
+
+test "resolveDataDirs - comma-separated config dirs all used, defaults excluded" {
+    const allocator = std.testing.allocator;
+    const dirs = try resolveDataDirs(allocator, "/a, /b ", "/home/tobez");
+    defer freeDirs(allocator, dirs);
+
+    try std.testing.expectEqual(@as(usize, 2), dirs.len);
+    try std.testing.expectEqualStrings("/a/projects", dirs[0]);
+    try std.testing.expectEqualStrings("/b/projects", dirs[1]);
+}
+
+test "resolveDataDirs - no config dir falls back to HOME defaults" {
+    const allocator = std.testing.allocator;
+    const dirs = try resolveDataDirs(allocator, null, "/home/tobez");
+    defer freeDirs(allocator, dirs);
+
+    try std.testing.expectEqual(@as(usize, 2), dirs.len);
+    try std.testing.expectEqualStrings("/home/tobez/.config/claude/projects", dirs[0]);
+    try std.testing.expectEqualStrings("/home/tobez/.claude/projects", dirs[1]);
+}
+
+test "resolveDataDirs - empty config dir falls back to HOME defaults" {
+    const allocator = std.testing.allocator;
+    const dirs = try resolveDataDirs(allocator, "  ", "/home/tobez");
+    defer freeDirs(allocator, dirs);
+
+    try std.testing.expectEqual(@as(usize, 2), dirs.len);
+    try std.testing.expect(dirsContainSuffix(dirs, "/.claude/projects"));
 }
 
 test "extractProjectAndSession - basic path" {
