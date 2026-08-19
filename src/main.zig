@@ -12,7 +12,7 @@ const table_output = @import("table_output.zig");
 const pricing = @import("pricing.zig");
 const context = @import("context.zig");
 
-const version = "ccuzage v0.2.0";
+const version = "ccuzage v0.3.0";
 
 const help_text =
     \\ccuzage - Claude Code usage analytics
