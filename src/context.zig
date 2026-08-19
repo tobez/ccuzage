@@ -1,15 +1,9 @@
-// ABOUTME: Shared helpers for the `ccuzage context` subcommand.
-// ABOUTME: Holds the token/window percentage rounding helper and the transcript tail scan.
+// ABOUTME: Implements the `ccuzage context` subcommand: discovers a session's
+// ABOUTME: transcript, tail-scans it for the last usage line, and prints the percent of the model's context window used.
 const std = @import("std");
 const scanner = @import("scanner.zig");
 const pricing = @import("pricing.zig");
 const loader = @import("loader.zig");
-
-/// Percentage of `window` used by `tokens`, rounded to nearest. Window 0 → 0.
-pub fn contextPercent(tokens: u64, window: u64) u64 {
-    if (window == 0) return 0;
-    return (tokens * 100 + window / 2) / window;
-}
 
 /// Context window for Claude Code's 1M-context model ids (e.g. "claude-opus-5[1m]").
 const million_context_marker = "[1m]";
@@ -17,6 +11,14 @@ const million_context_window: u64 = 1_000_000;
 
 /// Context window used when a model has no known context window.
 const default_context_window: u64 = 200_000;
+
+const default_chunk_size: usize = 256 * 1024;
+
+/// Percentage of `window` used by `tokens`, rounded to nearest. Window 0 → 0.
+pub fn contextPercent(tokens: u64, window: u64) u64 {
+    if (window == 0) return 0;
+    return (tokens * 100 + window / 2) / window;
+}
 
 /// Context window size for a model name: the `[1m]` marker wins, then the
 /// LiteLLM dynamic pricing table, then a default.
@@ -34,91 +36,6 @@ pub const LastContext = struct {
     tokens: u64,
     model: []const u8, // allocator-owned; caller frees
 };
-
-pub const ContextError = error{NoUsage};
-
-/// Absolute path of the transcript for `session_id`, if one exists.
-/// Returned path is allocator-owned; caller frees. Null when not found.
-pub fn findTranscript(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    env: *const std.process.Environ.Map,
-    session_id: []const u8,
-) !?[]const u8 {
-    const dirs = try loader.resolveDataDirs(allocator, env.get("CLAUDE_CONFIG_DIR"), env.get("HOME"));
-    defer {
-        for (dirs) |d| allocator.free(d);
-        allocator.free(dirs);
-    }
-
-    const filename = try std.fmt.allocPrint(allocator, "{s}.jsonl", .{session_id});
-    defer allocator.free(filename);
-
-    for (dirs) |dir_path| {
-        var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch continue;
-        defer dir.close(io);
-
-        var it = dir.iterate();
-        while (it.next(io) catch null) |entry| {
-            if (entry.kind != .directory) continue;
-
-            const candidate = try std.fs.path.join(allocator, &.{ dir_path, entry.name, filename });
-            std.Io.Dir.accessAbsolute(io, candidate, .{}) catch {
-                allocator.free(candidate);
-                continue;
-            };
-
-            return candidate;
-        }
-    }
-
-    return null;
-}
-
-/// Resolves the session's transcript, reads its last context usage, and prints
-/// the context-window percentage as `NN\n` to stdout.
-///
-/// `transcript_path`, when given, is used as-is. Otherwise the transcript is
-/// located via `CLAUDE_CODE_SESSION_ID` and `findTranscript`.
-///
-/// Errors: `error.NoSessionId` when no path is given and the environment has
-/// no session id; `error.TranscriptNotFound` when discovery finds nothing, or
-/// the resolved transcript cannot be read; `error.NoUsage` when the transcript
-/// has no qualifying usage line.
-pub fn runContext(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    env: *const std.process.Environ.Map,
-    transcript_path: ?[]const u8,
-) !void {
-    var owned_path: ?[]const u8 = null;
-    defer if (owned_path) |p| allocator.free(p);
-
-    const path: []const u8 = if (transcript_path) |p| p else blk: {
-        const session_id = env.get("CLAUDE_CODE_SESSION_ID") orelse return error.NoSessionId;
-        const found = findTranscript(io, allocator, env, session_id) catch return error.TranscriptNotFound;
-        const resolved = found orelse return error.TranscriptNotFound;
-        owned_path = resolved;
-        break :blk resolved;
-    };
-
-    const result = lastContextTokens(io, allocator, path) catch |err| switch (err) {
-        error.NoUsage => return error.NoUsage,
-        else => return error.TranscriptNotFound,
-    };
-    defer allocator.free(result.model);
-
-    const window = contextWindowFor(result.model);
-    const percent = contextPercent(result.tokens, window);
-
-    var stdout_buffer: [64]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
-    const stdout = &stdout_writer.interface;
-    try stdout.print("{d}\n", .{percent});
-    try stdout.flush();
-}
-
-const default_chunk_size: usize = 256 * 1024;
 
 /// Tokens and model of the last qualifying assistant turn in a transcript.
 pub fn lastContextTokens(
@@ -193,6 +110,103 @@ fn lastQualifyingInChunk(chunk: []const u8, allocator: std.mem.Allocator) !?Last
     return null;
 }
 
+/// Absolute path of the transcript for `session_id`, if one exists.
+/// Returned path is allocator-owned; caller frees. Null when not found.
+pub fn findTranscript(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    session_id: []const u8,
+) !?[]const u8 {
+    const dirs = try loader.resolveDataDirs(allocator, env.get("CLAUDE_CONFIG_DIR"), env.get("HOME"));
+    defer {
+        for (dirs) |d| allocator.free(d);
+        allocator.free(dirs);
+    }
+
+    const filename = try std.fmt.allocPrint(allocator, "{s}.jsonl", .{session_id});
+    defer allocator.free(filename);
+
+    for (dirs) |dir_path| {
+        var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
+
+        var it = dir.iterate();
+        while (it.next(io) catch null) |entry| {
+            if (entry.kind != .directory) continue;
+
+            const candidate = try std.fs.path.join(allocator, &.{ dir_path, entry.name, filename });
+            std.Io.Dir.accessAbsolute(io, candidate, .{}) catch {
+                allocator.free(candidate);
+                continue;
+            };
+
+            return candidate;
+        }
+    }
+
+    return null;
+}
+
+/// Resolves the session's transcript, reads its last context usage, and
+/// computes the context-window percentage used.
+///
+/// `transcript_path`, when given, is used as-is. Otherwise the transcript is
+/// located via `CLAUDE_CODE_SESSION_ID` and `findTranscript`.
+///
+/// Errors: `error.NoSessionId` when no path is given and the environment has
+/// no session id; `error.TranscriptNotFound` when discovery finds nothing, or
+/// the resolved transcript cannot be read; `error.NoUsage` when the transcript
+/// has no qualifying usage line.
+fn contextPercentForSession(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    transcript_path: ?[]const u8,
+) !u64 {
+    var owned_path: ?[]const u8 = null;
+    defer if (owned_path) |p| allocator.free(p);
+
+    const path: []const u8 = if (transcript_path) |p| p else blk: {
+        const session_id = env.get("CLAUDE_CODE_SESSION_ID") orelse return error.NoSessionId;
+        const found = findTranscript(io, allocator, env, session_id) catch return error.TranscriptNotFound;
+        const resolved = found orelse return error.TranscriptNotFound;
+        owned_path = resolved;
+        break :blk resolved;
+    };
+
+    const result = lastContextTokens(io, allocator, path) catch |err| switch (err) {
+        error.NoUsage => return error.NoUsage,
+        else => return error.TranscriptNotFound,
+    };
+    defer allocator.free(result.model);
+
+    const window = contextWindowFor(result.model);
+    return contextPercent(result.tokens, window);
+}
+
+/// Writes the context-window percentage as `NN\n`.
+fn writeContextPercent(writer: *std.Io.Writer, percent: u64) !void {
+    try writer.print("{d}\n", .{percent});
+}
+
+/// Resolves the session's transcript, reads its last context usage, and prints
+/// the context-window percentage to stdout. See `contextPercentForSession` for
+/// the error mapping.
+pub fn runContext(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    transcript_path: ?[]const u8,
+) !void {
+    const percent = try contextPercentForSession(io, allocator, env, transcript_path);
+
+    var stdout_buffer: [64]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    try writeContextPercent(&stdout_writer.interface, percent);
+    try stdout_writer.interface.flush();
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -228,6 +242,65 @@ test "contextPercent: window zero returns zero" {
 
 test "contextPercent: tokens zero returns zero" {
     try std.testing.expectEqual(@as(u64, 0), contextPercent(0, 200_000));
+}
+
+// =============================================================================
+// contextWindowFor
+// =============================================================================
+
+const context_window_test_fixture =
+    \\{
+    \\  "claude-opus-5": {
+    \\    "input_cost_per_token": 5e-06,
+    \\    "output_cost_per_token": 2.5e-05,
+    \\    "max_input_tokens": 1000000
+    \\  },
+    \\  "claude-opus-5[1m]": {
+    \\    "input_cost_per_token": 5e-06,
+    \\    "output_cost_per_token": 2.5e-05,
+    \\    "max_input_tokens": 50000
+    \\  },
+    \\  "claude-sonnet-4-5": {
+    \\    "input_cost_per_token": 3e-06,
+    \\    "output_cost_per_token": 1.5e-05,
+    \\    "max_input_tokens": 200000
+    \\  },
+    \\  "claude-haiku-4-5": {
+    \\    "input_cost_per_token": 1e-06,
+    \\    "output_cost_per_token": 5e-06
+    \\  }
+    \\}
+;
+
+test "contextWindowFor: [1m] marker wins over dynamic table" {
+    try pricing.initDynamicFromJson(std.testing.allocator, context_window_test_fixture);
+    defer pricing.deinitDynamic(std.testing.allocator);
+
+    // The dynamic table has an entry for the exact "claude-opus-5[1m]" key
+    // with a conflicting (smaller) max_input_tokens; the marker must win anyway.
+    try std.testing.expectEqual(@as(u64, 1_000_000), contextWindowFor("claude-opus-5[1m]"));
+}
+
+test "contextWindowFor: dynamic table hit returns its max_input_tokens" {
+    try pricing.initDynamicFromJson(std.testing.allocator, context_window_test_fixture);
+    defer pricing.deinitDynamic(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u64, 1_000_000), contextWindowFor("claude-opus-5"));
+    try std.testing.expectEqual(@as(u64, 200_000), contextWindowFor("claude-sonnet-4-5"));
+}
+
+test "contextWindowFor: model absent from table falls back to default" {
+    try pricing.initDynamicFromJson(std.testing.allocator, context_window_test_fixture);
+    defer pricing.deinitDynamic(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u64, 200_000), contextWindowFor("claude-nonexistent"));
+}
+
+test "contextWindowFor: entry without max_input_tokens falls back to default" {
+    try pricing.initDynamicFromJson(std.testing.allocator, context_window_test_fixture);
+    defer pricing.deinitDynamic(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u64, 200_000), contextWindowFor("claude-haiku-4-5"));
 }
 
 // =============================================================================
@@ -298,7 +371,7 @@ test "lastContextTokensChunked: duplicate usage lines - last wins, no double cou
         \\{"timestamp":"2025-01-15T10:00:00.000Z","message":{"usage":{"input_tokens":1000,"output_tokens":50,"cache_creation_input_tokens":200,"cache_read_input_tokens":300},"model":"claude-sonnet-4-20250514","id":"msg-001"},"requestId":"req-001"}
     ;
     const line_b =
-        \\{"timestamp":"2025-01-15T10:00:01.000Z","message":{"usage":{"input_tokens":1000,"output_tokens":50,"cache_creation_input_tokens":200,"cache_read_input_tokens":300},"model":"claude-sonnet-4-20250514","id":"msg-001"},"requestId":"req-001"}
+        \\{"timestamp":"2025-01-15T10:00:01.000Z","message":{"usage":{"input_tokens":9000,"output_tokens":50,"cache_creation_input_tokens":700,"cache_read_input_tokens":300},"model":"claude-sonnet-4-20250514","id":"msg-002"},"requestId":"req-002"}
     ;
     const content = line_a ++ "\n" ++ line_b ++ "\n";
     try writeTranscript(&tmp, "t.jsonl", content);
@@ -309,7 +382,9 @@ test "lastContextTokensChunked: duplicate usage lines - last wins, no double cou
     const result = try lastContextTokensChunked(std.testing.io, allocator, path, 4096);
     defer allocator.free(result.model);
 
-    try std.testing.expectEqual(@as(u64, 1500), result.tokens); // 1000 + 200 + 300, not doubled
+    // line_b is last and has different numbers than line_a; if first-wins or
+    // double-counting were happening, this would not equal line_b's total.
+    try std.testing.expectEqual(@as(u64, 10000), result.tokens); // 9000 + 700 + 300
 }
 
 test "lastContextTokensChunked: boundary straddle drops partial first line and doubles chunk" {
@@ -432,65 +507,6 @@ test "lastContextTokens: relative path that does not exist errors instead of abo
     const allocator = std.testing.allocator;
     const result = lastContextTokens(std.testing.io, allocator, "test-context-relative-tmp/does-not-exist.jsonl");
     try std.testing.expectError(error.FileNotFound, result);
-}
-
-// =============================================================================
-// contextWindowFor
-// =============================================================================
-
-const context_window_test_fixture =
-    \\{
-    \\  "claude-opus-5": {
-    \\    "input_cost_per_token": 5e-06,
-    \\    "output_cost_per_token": 2.5e-05,
-    \\    "max_input_tokens": 1000000
-    \\  },
-    \\  "claude-opus-5[1m]": {
-    \\    "input_cost_per_token": 5e-06,
-    \\    "output_cost_per_token": 2.5e-05,
-    \\    "max_input_tokens": 50000
-    \\  },
-    \\  "claude-sonnet-4-5": {
-    \\    "input_cost_per_token": 3e-06,
-    \\    "output_cost_per_token": 1.5e-05,
-    \\    "max_input_tokens": 200000
-    \\  },
-    \\  "claude-haiku-4-5": {
-    \\    "input_cost_per_token": 1e-06,
-    \\    "output_cost_per_token": 5e-06
-    \\  }
-    \\}
-;
-
-test "contextWindowFor: [1m] marker wins over dynamic table" {
-    try pricing.initDynamicFromJson(std.testing.allocator, context_window_test_fixture);
-    defer pricing.deinitDynamic(std.testing.allocator);
-
-    // The dynamic table has an entry for the exact "claude-opus-5[1m]" key
-    // with a conflicting (smaller) max_input_tokens; the marker must win anyway.
-    try std.testing.expectEqual(@as(u64, 1_000_000), contextWindowFor("claude-opus-5[1m]"));
-}
-
-test "contextWindowFor: dynamic table hit returns its max_input_tokens" {
-    try pricing.initDynamicFromJson(std.testing.allocator, context_window_test_fixture);
-    defer pricing.deinitDynamic(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(u64, 1_000_000), contextWindowFor("claude-opus-5"));
-    try std.testing.expectEqual(@as(u64, 200_000), contextWindowFor("claude-sonnet-4-5"));
-}
-
-test "contextWindowFor: model absent from table falls back to default" {
-    try pricing.initDynamicFromJson(std.testing.allocator, context_window_test_fixture);
-    defer pricing.deinitDynamic(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(u64, 200_000), contextWindowFor("claude-nonexistent"));
-}
-
-test "contextWindowFor: entry without max_input_tokens falls back to default" {
-    try pricing.initDynamicFromJson(std.testing.allocator, context_window_test_fixture);
-    defer pricing.deinitDynamic(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(u64, 200_000), contextWindowFor("claude-haiku-4-5"));
 }
 
 // =============================================================================
@@ -636,4 +652,87 @@ test "findTranscript: nonexistent data dir in the list is skipped, not an error"
     const expected = try std.fs.path.join(allocator, &.{ root, "projects", "some-project", "sess-abc.jsonl" });
     defer allocator.free(expected);
     try std.testing.expectEqualStrings(expected, result.?);
+}
+
+// =============================================================================
+// contextPercentForSession / runContext
+// =============================================================================
+
+test "contextPercentForSession: reflects the LiteLLM context window, not the 200k default" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // A window far from the 200k default, so a wrong (default) window would
+    // produce a different percentage and this test would fail.
+    const fixture =
+        \\{
+        \\  "claude-context-fixture-model": {
+        \\    "input_cost_per_token": 1e-06,
+        \\    "output_cost_per_token": 2e-06,
+        \\    "max_input_tokens": 50000
+        \\  }
+        \\}
+    ;
+    try pricing.initDynamicFromJson(allocator, fixture);
+    defer pricing.deinitDynamic(allocator);
+
+    const line1 =
+        \\{"timestamp":"2025-01-15T10:00:00.000Z","message":{"usage":{"input_tokens":20000,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":5000},"model":"claude-context-fixture-model","id":"msg-001"},"requestId":"req-001"}
+    ;
+    try writeTranscript(&tmp, "t.jsonl", line1 ++ "\n");
+
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "t.jsonl", allocator);
+    defer allocator.free(path);
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+
+    const percent = try contextPercentForSession(std.testing.io, allocator, &env, path);
+
+    // tokens = 20000 + 5000 = 25000; LiteLLM fixture window = 50000 -> 50%.
+    // The 200k default would give 13% instead.
+    try std.testing.expectEqual(@as(u64, 50), percent);
+}
+
+test "contextPercentForSession: no path and no session id returns NoSessionId" {
+    const allocator = std.testing.allocator;
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+
+    const result = contextPercentForSession(std.testing.io, allocator, &env, null);
+    try std.testing.expectError(error.NoSessionId, result);
+}
+
+test "contextPercentForSession: unreadable transcript path returns TranscriptNotFound" {
+    const allocator = std.testing.allocator;
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+
+    const result = contextPercentForSession(std.testing.io, allocator, &env, "does-not-exist-ccuzage-fixture.jsonl");
+    try std.testing.expectError(error.TranscriptNotFound, result);
+}
+
+test "contextPercentForSession: transcript with no qualifying usage returns NoUsage" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeTranscript(&tmp, "empty.jsonl", "");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "empty.jsonl", allocator);
+    defer allocator.free(path);
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+
+    const result = contextPercentForSession(std.testing.io, allocator, &env, path);
+    try std.testing.expectError(error.NoUsage, result);
+}
+
+test "writeContextPercent: NN newline output shape" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    try writeContextPercent(&aw.writer, 42);
+    try std.testing.expectEqualStrings("42\n", aw.writer.buffered());
 }
