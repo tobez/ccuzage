@@ -10,6 +10,7 @@ const json_output = @import("json_output.zig");
 const statusline_mod = @import("statusline.zig");
 const table_output = @import("table_output.zig");
 const pricing = @import("pricing.zig");
+const context = @import("context.zig");
 
 const version = "ccuzage v0.2.0";
 
@@ -25,6 +26,7 @@ const help_text =
     \\  session    Usage grouped by conversation
     \\  blocks     5-hour billing window analysis
     \\  statusline Real-time usage for Claude Code status bar
+    \\  context    Context window usage of the current session (percent)
     \\
     \\Options:
     \\  -s, --since YYYYMMDD    Start date filter
@@ -45,6 +47,9 @@ const help_text =
     \\
     \\Statusline-specific:
     \\  -B, --visual-burn-rate MODE  Burn rate display: off, emoji, text, emoji-text (default: off)
+    \\
+    \\Context-specific:
+    \\  ccuzage context [PATH]  Read PATH's transcript instead of discovering it from the environment
     \\
     \\General:
     \\  --version           Print version and exit
@@ -138,6 +143,10 @@ pub fn parseArgs(args: []const []const u8) ParseError!types.CliOptions {
             }
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return ParseError.UnknownFlag;
+        } else if (opts.command == .context and opts.transcript_path == null) {
+            // Already in context mode with no path yet: the bare word is the
+            // transcript path, not a command name.
+            opts.transcript_path = arg;
         } else {
             // Non-flag argument: treat as command name
             if (std.mem.eql(u8, arg, "daily")) {
@@ -152,6 +161,8 @@ pub fn parseArgs(args: []const []const u8) ParseError!types.CliOptions {
                 opts.command = .blocks;
             } else if (std.mem.eql(u8, arg, "statusline")) {
                 opts.command = .statusline;
+            } else if (std.mem.eql(u8, arg, "context")) {
+                opts.command = .context;
             } else {
                 return ParseError.UnknownFlag;
             }
@@ -220,6 +231,20 @@ pub fn main(init: std.process.Init) !void {
     if (opts.command == .statusline) {
         statusline_mod.runStatusline(io, allocator, env, tz_offset, opts.session_length, opts.burn_rate_visual) catch {
             try stderr_print(io, "Error: statusline failed\n");
+            std.process.exit(1);
+        };
+        return;
+    }
+
+    // Context reads a single transcript, not the whole usage dataset
+    if (opts.command == .context) {
+        context.runContext(io, allocator, env, opts.transcript_path) catch |err| {
+            switch (err) {
+                error.NoSessionId => try stderr_print(io, "Error: no session id available; set CLAUDE_CODE_SESSION_ID or pass a transcript path\n"),
+                error.TranscriptNotFound => try stderr_print(io, "Error: transcript not found\n"),
+                error.NoUsage => try stderr_print(io, "Error: no usage data in transcript\n"),
+                else => try stderr_print(io, "Error: context failed\n"),
+            }
             std.process.exit(1);
         };
         return;
@@ -389,6 +414,7 @@ pub fn main(init: std.process.Init) !void {
             }
         },
         .statusline => unreachable, // handled above before entry loading
+        .context => unreachable, // handled above before entry loading
     }
 
     try stdout.flush();
@@ -613,6 +639,51 @@ test "parseArgs: -B missing value returns error" {
     try std.testing.expectError(ParseError.MissingValue, result);
 }
 
+test "parseArgs: context command with no path" {
+    const opts = try parseArgs(&[_][]const u8{"context"});
+    try std.testing.expectEqual(types.Command.context, opts.command);
+    try std.testing.expectEqual(@as(?[]const u8, null), opts.transcript_path);
+}
+
+test "parseArgs: context command with transcript path" {
+    const opts = try parseArgs(&[_][]const u8{ "context", "/tmp/x.jsonl" });
+    try std.testing.expectEqual(types.Command.context, opts.command);
+    try std.testing.expectEqualStrings("/tmp/x.jsonl", opts.transcript_path.?);
+}
+
+test "parseArgs: context command with two positionals returns error" {
+    const result = parseArgs(&[_][]const u8{ "context", "/tmp/x.jsonl", "/tmp/y.jsonl" });
+    try std.testing.expectError(ParseError.UnknownFlag, result);
+}
+
+test "parseArgs: positional after non-context command still errors" {
+    const result = parseArgs(&[_][]const u8{ "daily", "bareword" });
+    try std.testing.expectError(ParseError.UnknownFlag, result);
+}
+
+test "parseArgs: context command with flag does not crash" {
+    const opts = try parseArgs(&[_][]const u8{ "context", "--json" });
+    try std.testing.expectEqual(types.Command.context, opts.command);
+    try std.testing.expectEqual(true, opts.json);
+}
+
+test "parseArgs: context command treats a command-named positional as the path" {
+    const opts = try parseArgs(&[_][]const u8{ "context", "statusline" });
+    try std.testing.expectEqual(types.Command.context, opts.command);
+    try std.testing.expectEqualStrings("statusline", opts.transcript_path.?);
+}
+
+test "parseArgs: context command treats another command-named positional as the path" {
+    const opts = try parseArgs(&[_][]const u8{ "context", "daily" });
+    try std.testing.expectEqual(types.Command.context, opts.command);
+    try std.testing.expectEqualStrings("daily", opts.transcript_path.?);
+}
+
+test "parseArgs: weekly then daily resolves as the later command" {
+    const opts = try parseArgs(&[_][]const u8{ "weekly", "daily" });
+    try std.testing.expectEqual(types.Command.daily, opts.command);
+}
+
 test {
     _ = @import("date.zig");
     _ = @import("types.zig");
@@ -626,4 +697,5 @@ test {
     _ = @import("integration_test.zig");
     _ = @import("scanner.zig");
     _ = @import("pricing.zig");
+    _ = @import("context.zig");
 }

@@ -75,6 +75,7 @@ const pricing_table = [_]struct { name: []const u8, pricing: ModelPricing }{
 pub const DynamicModelEntry = struct {
     name: []const u8,
     pricing: ModelPricing,
+    context_window: ?u64,
 };
 
 fn isClaudeKey(key: []const u8) bool {
@@ -87,6 +88,12 @@ fn isClaudeKey(key: []const u8) bool {
 fn extractOptionalF64(buf: []const u8, obj_start: usize, key: []const u8) ?f64 {
     const pos = scanner.findKeyInObject(buf, obj_start, key) orelse return null;
     const result = scanner.extractF64(buf, pos) orelse return null;
+    return result.value;
+}
+
+fn extractOptionalU64(buf: []const u8, obj_start: usize, key: []const u8) ?u64 {
+    const pos = scanner.findKeyInObject(buf, obj_start, key) orelse return null;
+    const result = scanner.extractU64(buf, pos) orelse return null;
     return result.value;
 }
 
@@ -135,9 +142,11 @@ pub fn parseLiteLLMJson(allocator: std.mem.Allocator, json: []const u8) ![]Dynam
                 .cache_read_cost_above_200k = extractOptionalF64(json, obj_start, "cache_read_input_token_cost_above_200k_tokens"),
             };
 
+            const context_window = extractOptionalU64(json, obj_start, "max_input_tokens");
+
             const name = try allocator.dupe(u8, key);
             errdefer allocator.free(name);
-            try entries.append(allocator, .{ .name = name, .pricing = pricing });
+            try entries.append(allocator, .{ .name = name, .pricing = pricing, .context_window = context_window });
 
             // Skip past the value object
             p = scanner.skipValue(json, obj_start) orelse return error.InvalidJson;
@@ -252,7 +261,12 @@ pub fn initDynamic(io: std.Io, allocator: std.mem.Allocator, env: *const std.pro
     };
     defer allocator.free(json);
 
-    const table = parseLiteLLMJson(allocator, json) catch return;
+    initDynamicFromJson(allocator, json) catch return;
+}
+
+/// Parse LiteLLM JSON and install it as the dynamic pricing table.
+pub fn initDynamicFromJson(allocator: std.mem.Allocator, json: []const u8) !void {
+    const table = try parseLiteLLMJson(allocator, json);
     dynamic_state = .{ .table = table };
 }
 
@@ -276,29 +290,44 @@ fn lookupHardcoded(model_name: []const u8) ?ModelPricing {
     return null;
 }
 
-/// Look up pricing for a model name. Checks dynamic table first, then hardcoded.
-pub fn lookupModel(model_name: []const u8) ?ModelPricing {
+/// Find a model's entry in the dynamic table by exact name, then by the
+/// "anthropic/<model_name>" and "anthropic.<model_name>" prefix forms.
+fn findDynamicEntry(model_name: []const u8) ?*const DynamicModelEntry {
     if (dynamic_state) |state| {
         // Exact match in dynamic table
-        for (state.table) |entry| {
+        for (state.table) |*entry| {
             if (std.mem.eql(u8, entry.name, model_name)) {
-                return entry.pricing;
+                return entry;
             }
         }
         // Try matching "anthropic/<model_name>" and "anthropic.<model_name>" entries
         const prefixes = [_][]const u8{ "anthropic/", "anthropic." };
         for (&prefixes) |prefix| {
-            for (state.table) |entry| {
+            for (state.table) |*entry| {
                 if (entry.name.len == prefix.len + model_name.len and
                     std.mem.startsWith(u8, entry.name, prefix) and
                     std.mem.eql(u8, entry.name[prefix.len..], model_name))
                 {
-                    return entry.pricing;
+                    return entry;
                 }
             }
         }
     }
+    return null;
+}
+
+/// Look up pricing for a model name. Checks dynamic table first, then hardcoded.
+pub fn lookupModel(model_name: []const u8) ?ModelPricing {
+    if (findDynamicEntry(model_name)) |entry| {
+        return entry.pricing;
+    }
     return lookupHardcoded(model_name);
+}
+
+/// Context window (LiteLLM max_input_tokens) for a model, if known.
+pub fn lookupContextWindow(model_name: []const u8) ?u64 {
+    const entry = findDynamicEntry(model_name) orelse return null;
+    return entry.context_window;
 }
 
 /// Calculate cost for tokens with optional tiered pricing.
@@ -438,6 +467,7 @@ const test_fixture =
     \\    "cache_creation_input_token_cost_above_200k_tokens": 1.25e-05,
     \\    "cache_read_input_token_cost_above_200k_tokens": 1e-06,
     \\    "max_tokens": 128000,
+    \\    "max_input_tokens": 1000000,
     \\    "litellm_provider": "anthropic"
     \\  },
     \\  "gpt-4": {
@@ -455,7 +485,8 @@ const test_fixture =
     \\  "anthropic/claude-sonnet-4": {
     \\    "input_cost_per_token": 3e-06,
     \\    "output_cost_per_token": 1.5e-05,
-    \\    "max_tokens": 64000
+    \\    "max_tokens": 64000,
+    \\    "max_input_tokens": 200000
     \\  },
     \\  "anthropic.claude-sonnet-4": {
     \\    "input_cost_per_token": 3e-06,
@@ -511,6 +542,20 @@ test "parseLiteLLMJson: tiered fields null when absent" {
     try std.testing.expect(p.output_cost_above_200k == null);
     try std.testing.expect(p.cache_creation_cost_above_200k == null);
     try std.testing.expect(p.cache_read_cost_above_200k == null);
+}
+
+test "parseLiteLLMJson: extracts max_input_tokens as context_window" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    defer freeTestEntries(entries);
+    // First entry is claude-opus-4-6, which has max_input_tokens
+    try std.testing.expectEqual(@as(?u64, 1_000_000), entries[0].context_window);
+}
+
+test "parseLiteLLMJson: context_window null when max_input_tokens absent" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    defer freeTestEntries(entries);
+    // Second entry is haiku, which has no max_input_tokens
+    try std.testing.expectEqual(@as(?u64, null), entries[1].context_window);
 }
 
 test "parseLiteLLMJson: anthropic/ prefix models included" {
@@ -617,6 +662,38 @@ test "lookupModel: no dynamic state uses hardcoded only" {
     dynamic_state = null;
     try std.testing.expect(lookupModel("claude-opus-4-6") != null);
     try std.testing.expect(lookupModel("gpt-4") == null);
+}
+
+test "lookupContextWindow: exact name hit" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    dynamic_state = .{ .table = entries };
+    defer deinitDynamic(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u64, 1_000_000), lookupContextWindow("claude-opus-4-6"));
+}
+
+test "lookupContextWindow: anthropic/ prefix hit" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    dynamic_state = .{ .table = entries };
+    defer deinitDynamic(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u64, 200_000), lookupContextWindow("claude-sonnet-4"));
+}
+
+test "lookupContextWindow: unknown model returns null" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    dynamic_state = .{ .table = entries };
+    defer deinitDynamic(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u64, null), lookupContextWindow("claude-nonexistent"));
+}
+
+test "lookupContextWindow: entry present without max_input_tokens returns null" {
+    const entries = try parseLiteLLMJson(std.testing.allocator, test_fixture);
+    dynamic_state = .{ .table = entries };
+    defer deinitDynamic(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u64, null), lookupContextWindow("claude-haiku-4-5-20251001"));
 }
 
 test "isClaudeKey: identifies Claude model keys" {

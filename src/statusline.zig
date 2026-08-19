@@ -6,6 +6,7 @@ const loader = @import("loader.zig");
 const aggregate = @import("aggregate.zig");
 const blocks_mod = @import("blocks.zig");
 const date = @import("date.zig");
+const context = @import("context.zig");
 
 pub const StatuslineInput = struct {
     model_id: []const u8,
@@ -211,7 +212,7 @@ fn formatRichStatusline(buf: []u8, data: StatuslineData) []u8 {
     if (data.context_window_size == 0) {
         writer.append(buf, &pos, " (?%)");
     } else {
-        const pct: u64 = data.context_tokens * 100 / data.context_window_size;
+        const pct: u64 = context.contextPercent(data.context_tokens, data.context_window_size);
         var pct_buf: [16]u8 = undefined;
         const pct_str = std.fmt.bufPrint(&pct_buf, " ({d}%)", .{pct}) catch pct_buf[0..0];
         writer.append(buf, &pos, pct_str);
@@ -524,9 +525,9 @@ test "formatRichStatusline: with active block" {
         .burn_rate_visual = .off,
     };
     const result = formatRichStatusline(&buf, data);
-    // 🤖 Opus | 💰 $0.23 session / $1.23 today / $0.45 block (2h 45m left) | 🔥 $0.12/hr | 🧠 25,000 (12%)
+    // 🤖 Opus | 💰 $0.23 session / $1.23 today / $0.45 block (2h 45m left) | 🔥 $0.12/hr | 🧠 25,000 (13%)
     try std.testing.expectEqualStrings(
-        "\xf0\x9f\xa4\x96 Opus | \xf0\x9f\x92\xb0 $0.23 session / $1.23 today / $0.45 block (2h 45m left) | \xf0\x9f\x94\xa5 $0.12/hr | \xf0\x9f\xa7\xa0 25,000 (12%)",
+        "\xf0\x9f\xa4\x96 Opus | \xf0\x9f\x92\xb0 $0.23 session / $1.23 today / $0.45 block (2h 45m left) | \xf0\x9f\x94\xa5 $0.12/hr | \xf0\x9f\xa7\xa0 25,000 (13%)",
         result,
     );
 }
@@ -546,9 +547,9 @@ test "formatRichStatusline: without active block" {
         .burn_rate_visual = .off,
     };
     const result = formatRichStatusline(&buf, data);
-    // 🤖 Opus | 💰 $0.23 session / $1.23 today / No active block | 🧠 25,000 (12%)
+    // 🤖 Opus | 💰 $0.23 session / $1.23 today / No active block | 🧠 25,000 (13%)
     try std.testing.expectEqualStrings(
-        "\xf0\x9f\xa4\x96 Opus | \xf0\x9f\x92\xb0 $0.23 session / $1.23 today / No active block | \xf0\x9f\xa7\xa0 25,000 (12%)",
+        "\xf0\x9f\xa4\x96 Opus | \xf0\x9f\x92\xb0 $0.23 session / $1.23 today / No active block | \xf0\x9f\xa7\xa0 25,000 (13%)",
         result,
     );
 }
