@@ -132,7 +132,7 @@ pub fn discoverJsonlFiles(io: std.Io, allocator: std.mem.Allocator, env: *const 
 /// When CLAUDE_CONFIG_DIR is set, its comma-separated entries are used exclusively;
 /// the HOME defaults (~/.config/claude, ~/.claude) apply only when no config dir is given.
 /// Caller owns the returned slice and each path within it.
-fn resolveDataDirs(allocator: std.mem.Allocator, claude_config_dir: ?[]const u8, home: ?[]const u8) ![][]const u8 {
+pub fn resolveDataDirs(allocator: std.mem.Allocator, claude_config_dir: ?[]const u8, home: ?[]const u8) ![][]const u8 {
     var dirs: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (dirs.items) |d| allocator.free(d);

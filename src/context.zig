@@ -3,6 +3,7 @@
 const std = @import("std");
 const scanner = @import("scanner.zig");
 const pricing = @import("pricing.zig");
+const loader = @import("loader.zig");
 
 /// Percentage of `window` used by `tokens`, rounded to nearest. Window 0 → 0.
 pub fn contextPercent(tokens: u64, window: u64) u64 {
@@ -35,6 +36,44 @@ pub const LastContext = struct {
 };
 
 pub const ContextError = error{NoUsage};
+
+/// Absolute path of the transcript for `session_id`, if one exists.
+/// Returned path is allocator-owned; caller frees. Null when not found.
+pub fn findTranscript(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    session_id: []const u8,
+) !?[]const u8 {
+    const dirs = try loader.resolveDataDirs(allocator, env.get("CLAUDE_CONFIG_DIR"), env.get("HOME"));
+    defer {
+        for (dirs) |d| allocator.free(d);
+        allocator.free(dirs);
+    }
+
+    const filename = try std.fmt.allocPrint(allocator, "{s}.jsonl", .{session_id});
+    defer allocator.free(filename);
+
+    for (dirs) |dir_path| {
+        var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
+
+        var it = dir.iterate();
+        while (it.next(io) catch null) |entry| {
+            if (entry.kind != .directory) continue;
+
+            const candidate = try std.fs.path.join(allocator, &.{ dir_path, entry.name, filename });
+            std.Io.Dir.accessAbsolute(io, candidate, .{}) catch {
+                allocator.free(candidate);
+                continue;
+            };
+
+            return candidate;
+        }
+    }
+
+    return null;
+}
 
 const default_chunk_size: usize = 256 * 1024;
 
@@ -382,4 +421,116 @@ test "contextWindowFor: entry without max_input_tokens falls back to default" {
     defer pricing.deinitDynamic(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u64, 200_000), contextWindowFor("claude-haiku-4-5"));
+}
+
+// =============================================================================
+// findTranscript
+// =============================================================================
+
+fn tmpRootPath(tmp: *std.testing.TmpDir, allocator: std.mem.Allocator) ![]u8 {
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &buf);
+    return allocator.dupe(u8, buf[0..len]);
+}
+
+test "findTranscript: finds the transcript under the sole data dir" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "projects/some-project");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "projects/some-project/sess-abc.jsonl", .data = "" });
+
+    const root = try tmpRootPath(&tmp, allocator);
+    defer allocator.free(root);
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("CLAUDE_CONFIG_DIR", root);
+
+    const result = try findTranscript(std.testing.io, allocator, &env, "sess-abc");
+    try std.testing.expect(result != null);
+    defer allocator.free(result.?);
+
+    const expected = try std.fs.path.join(allocator, &.{ root, "projects", "some-project", "sess-abc.jsonl" });
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, result.?);
+}
+
+test "findTranscript: no matching session id anywhere returns null" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "projects/some-project");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "projects/some-project/sess-abc.jsonl", .data = "" });
+
+    const root = try tmpRootPath(&tmp, allocator);
+    defer allocator.free(root);
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("CLAUDE_CONFIG_DIR", root);
+
+    const result = try findTranscript(std.testing.io, allocator, &env, "sess-does-not-exist");
+    try std.testing.expect(result == null);
+}
+
+test "findTranscript: finds the transcript in the second of two data dirs" {
+    const allocator = std.testing.allocator;
+    var tmpA = std.testing.tmpDir(.{});
+    defer tmpA.cleanup();
+    var tmpB = std.testing.tmpDir(.{});
+    defer tmpB.cleanup();
+
+    try tmpA.dir.createDirPath(std.testing.io, "projects/other-project");
+    try tmpB.dir.createDirPath(std.testing.io, "projects/some-project");
+    try tmpB.dir.writeFile(std.testing.io, .{ .sub_path = "projects/some-project/sess-abc.jsonl", .data = "" });
+
+    const rootA = try tmpRootPath(&tmpA, allocator);
+    defer allocator.free(rootA);
+    const rootB = try tmpRootPath(&tmpB, allocator);
+    defer allocator.free(rootB);
+
+    const combined = try std.fmt.allocPrint(allocator, "{s},{s}", .{ rootA, rootB });
+    defer allocator.free(combined);
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("CLAUDE_CONFIG_DIR", combined);
+
+    const result = try findTranscript(std.testing.io, allocator, &env, "sess-abc");
+    try std.testing.expect(result != null);
+    defer allocator.free(result.?);
+
+    const expected = try std.fs.path.join(allocator, &.{ rootB, "projects", "some-project", "sess-abc.jsonl" });
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, result.?);
+}
+
+test "findTranscript: nonexistent data dir in the list is skipped, not an error" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "projects/some-project");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "projects/some-project/sess-abc.jsonl", .data = "" });
+
+    const root = try tmpRootPath(&tmp, allocator);
+    defer allocator.free(root);
+
+    const combined = try std.fmt.allocPrint(allocator, "/nonexistent-ccuzage-test-dir-xyz,{s}", .{root});
+    defer allocator.free(combined);
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("CLAUDE_CONFIG_DIR", combined);
+
+    const result = try findTranscript(std.testing.io, allocator, &env, "sess-abc");
+    try std.testing.expect(result != null);
+    defer allocator.free(result.?);
+
+    const expected = try std.fs.path.join(allocator, &.{ root, "projects", "some-project", "sess-abc.jsonl" });
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, result.?);
 }
