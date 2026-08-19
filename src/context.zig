@@ -2,11 +2,31 @@
 // ABOUTME: Holds the token/window percentage rounding helper and the transcript tail scan.
 const std = @import("std");
 const scanner = @import("scanner.zig");
+const pricing = @import("pricing.zig");
 
 /// Percentage of `window` used by `tokens`, rounded to nearest. Window 0 → 0.
 pub fn contextPercent(tokens: u64, window: u64) u64 {
     if (window == 0) return 0;
     return (tokens * 100 + window / 2) / window;
+}
+
+/// Context window for Claude Code's 1M-context model ids (e.g. "claude-opus-5[1m]").
+const million_context_marker = "[1m]";
+const million_context_window: u64 = 1_000_000;
+
+/// Context window used when a model has no known context window.
+const default_context_window: u64 = 200_000;
+
+/// Context window size for a model name: the `[1m]` marker wins, then the
+/// LiteLLM dynamic pricing table, then a default.
+pub fn contextWindowFor(model_name: []const u8) u64 {
+    if (std.mem.indexOf(u8, model_name, million_context_marker) != null) {
+        return million_context_window;
+    }
+    if (pricing.lookupContextWindow(model_name)) |window| {
+        return window;
+    }
+    return default_context_window;
 }
 
 pub const LastContext = struct {
@@ -303,4 +323,63 @@ test "lastContextTokens: default-chunk wrapper finds the qualifying line" {
 
     try std.testing.expectEqual(@as(u64, 150), result.tokens); // 100 + 50
     try std.testing.expectEqualStrings("claude-sonnet-4-20250514", result.model);
+}
+
+// =============================================================================
+// contextWindowFor
+// =============================================================================
+
+const context_window_test_fixture =
+    \\{
+    \\  "claude-opus-5": {
+    \\    "input_cost_per_token": 5e-06,
+    \\    "output_cost_per_token": 2.5e-05,
+    \\    "max_input_tokens": 1000000
+    \\  },
+    \\  "claude-opus-5[1m]": {
+    \\    "input_cost_per_token": 5e-06,
+    \\    "output_cost_per_token": 2.5e-05,
+    \\    "max_input_tokens": 50000
+    \\  },
+    \\  "claude-sonnet-4-5": {
+    \\    "input_cost_per_token": 3e-06,
+    \\    "output_cost_per_token": 1.5e-05,
+    \\    "max_input_tokens": 200000
+    \\  },
+    \\  "claude-haiku-4-5": {
+    \\    "input_cost_per_token": 1e-06,
+    \\    "output_cost_per_token": 5e-06
+    \\  }
+    \\}
+;
+
+test "contextWindowFor: [1m] marker wins over dynamic table" {
+    try pricing.initDynamicFromJson(std.testing.allocator, context_window_test_fixture);
+    defer pricing.deinitDynamic(std.testing.allocator);
+
+    // The dynamic table has an entry for the exact "claude-opus-5[1m]" key
+    // with a conflicting (smaller) max_input_tokens; the marker must win anyway.
+    try std.testing.expectEqual(@as(u64, 1_000_000), contextWindowFor("claude-opus-5[1m]"));
+}
+
+test "contextWindowFor: dynamic table hit returns its max_input_tokens" {
+    try pricing.initDynamicFromJson(std.testing.allocator, context_window_test_fixture);
+    defer pricing.deinitDynamic(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u64, 1_000_000), contextWindowFor("claude-opus-5"));
+    try std.testing.expectEqual(@as(u64, 200_000), contextWindowFor("claude-sonnet-4-5"));
+}
+
+test "contextWindowFor: model absent from table falls back to default" {
+    try pricing.initDynamicFromJson(std.testing.allocator, context_window_test_fixture);
+    defer pricing.deinitDynamic(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u64, 200_000), contextWindowFor("claude-nonexistent"));
+}
+
+test "contextWindowFor: entry without max_input_tokens falls back to default" {
+    try pricing.initDynamicFromJson(std.testing.allocator, context_window_test_fixture);
+    defer pricing.deinitDynamic(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u64, 200_000), contextWindowFor("claude-haiku-4-5"));
 }

@@ -261,7 +261,12 @@ pub fn initDynamic(io: std.Io, allocator: std.mem.Allocator, env: *const std.pro
     };
     defer allocator.free(json);
 
-    const table = parseLiteLLMJson(allocator, json) catch return;
+    initDynamicFromJson(allocator, json) catch return;
+}
+
+/// Parse LiteLLM JSON and install it as the dynamic pricing table.
+pub fn initDynamicFromJson(allocator: std.mem.Allocator, json: []const u8) !void {
+    const table = try parseLiteLLMJson(allocator, json);
     dynamic_state = .{ .table = table };
 }
 
