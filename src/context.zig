@@ -508,6 +508,39 @@ test "findTranscript: finds the transcript in the second of two data dirs" {
     try std.testing.expectEqualStrings(expected, result.?);
 }
 
+test "findTranscript: matches in both data dirs prefer the earlier one" {
+    const allocator = std.testing.allocator;
+    var tmpA = std.testing.tmpDir(.{});
+    defer tmpA.cleanup();
+    var tmpB = std.testing.tmpDir(.{});
+    defer tmpB.cleanup();
+
+    try tmpA.dir.createDirPath(std.testing.io, "projects/project-a");
+    try tmpA.dir.writeFile(std.testing.io, .{ .sub_path = "projects/project-a/sess-abc.jsonl", .data = "" });
+    try tmpB.dir.createDirPath(std.testing.io, "projects/project-b");
+    try tmpB.dir.writeFile(std.testing.io, .{ .sub_path = "projects/project-b/sess-abc.jsonl", .data = "" });
+
+    const rootA = try tmpRootPath(&tmpA, allocator);
+    defer allocator.free(rootA);
+    const rootB = try tmpRootPath(&tmpB, allocator);
+    defer allocator.free(rootB);
+
+    const combined = try std.fmt.allocPrint(allocator, "{s},{s}", .{ rootA, rootB });
+    defer allocator.free(combined);
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("CLAUDE_CONFIG_DIR", combined);
+
+    const result = try findTranscript(std.testing.io, allocator, &env, "sess-abc");
+    try std.testing.expect(result != null);
+    defer allocator.free(result.?);
+
+    const expected = try std.fs.path.join(allocator, &.{ rootA, "projects", "project-a", "sess-abc.jsonl" });
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, result.?);
+}
+
 test "findTranscript: nonexistent data dir in the list is skipped, not an error" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
