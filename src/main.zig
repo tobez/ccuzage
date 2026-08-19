@@ -626,4 +626,5 @@ test {
     _ = @import("integration_test.zig");
     _ = @import("scanner.zig");
     _ = @import("pricing.zig");
+    _ = @import("context.zig");
 }
