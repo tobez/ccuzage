@@ -138,7 +138,9 @@ fn lastContextTokensChunked(
     path: []const u8,
     chunk_size: usize,
 ) !LastContext {
-    var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    // openFileAbsolute asserts an absolute path; PATH may be given relative
+    // to the caller's cwd, so open through cwd() instead, which accepts both.
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
 
     const file_size = (try file.stat(io)).size;
@@ -405,6 +407,31 @@ test "lastContextTokens: default-chunk wrapper finds the qualifying line" {
 
     try std.testing.expectEqual(@as(u64, 150), result.tokens); // 100 + 50
     try std.testing.expectEqualStrings("claude-sonnet-4-20250514", result.model);
+}
+
+test "lastContextTokens: relative path that exists resolves correctly" {
+    const allocator = std.testing.allocator;
+    const dir_name = "test-context-relative-tmp";
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, dir_name);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir_name) catch {};
+
+    const line1 =
+        \\{"timestamp":"2025-01-15T10:00:00.000Z","message":{"usage":{"input_tokens":100,"output_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":50},"model":"claude-sonnet-4-20250514","id":"msg-001"},"requestId":"req-001"}
+    ;
+    const content = line1 ++ "\n";
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = dir_name ++ "/t.jsonl", .data = content });
+
+    const result = try lastContextTokens(std.testing.io, allocator, dir_name ++ "/t.jsonl");
+    defer allocator.free(result.model);
+
+    try std.testing.expectEqual(@as(u64, 150), result.tokens); // 100 + 50
+    try std.testing.expectEqualStrings("claude-sonnet-4-20250514", result.model);
+}
+
+test "lastContextTokens: relative path that does not exist errors instead of aborting" {
+    const allocator = std.testing.allocator;
+    const result = lastContextTokens(std.testing.io, allocator, "test-context-relative-tmp/does-not-exist.jsonl");
+    try std.testing.expectError(error.FileNotFound, result);
 }
 
 // =============================================================================
