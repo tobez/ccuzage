@@ -48,6 +48,9 @@ const help_text =
     \\Statusline-specific:
     \\  -B, --visual-burn-rate MODE  Burn rate display: off, emoji, text, emoji-text (default: off)
     \\
+    \\Context-specific:
+    \\  ccuzage context [PATH]  Read PATH's transcript instead of discovering it from the environment
+    \\
     \\General:
     \\  --version           Print version and exit
     \\  --help              Print this help and exit
