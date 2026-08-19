@@ -140,6 +140,10 @@ pub fn parseArgs(args: []const []const u8) ParseError!types.CliOptions {
             }
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return ParseError.UnknownFlag;
+        } else if (opts.command == .context and opts.transcript_path == null) {
+            // Already in context mode with no path yet: the bare word is the
+            // transcript path, not a command name.
+            opts.transcript_path = arg;
         } else {
             // Non-flag argument: treat as command name
             if (std.mem.eql(u8, arg, "daily")) {
@@ -156,8 +160,6 @@ pub fn parseArgs(args: []const []const u8) ParseError!types.CliOptions {
                 opts.command = .statusline;
             } else if (std.mem.eql(u8, arg, "context")) {
                 opts.command = .context;
-            } else if (opts.command == .context and opts.transcript_path == null) {
-                opts.transcript_path = arg;
             } else {
                 return ParseError.UnknownFlag;
             }
@@ -660,6 +662,23 @@ test "parseArgs: context command with flag does not crash" {
     const opts = try parseArgs(&[_][]const u8{ "context", "--json" });
     try std.testing.expectEqual(types.Command.context, opts.command);
     try std.testing.expectEqual(true, opts.json);
+}
+
+test "parseArgs: context command treats a command-named positional as the path" {
+    const opts = try parseArgs(&[_][]const u8{ "context", "statusline" });
+    try std.testing.expectEqual(types.Command.context, opts.command);
+    try std.testing.expectEqualStrings("statusline", opts.transcript_path.?);
+}
+
+test "parseArgs: context command treats another command-named positional as the path" {
+    const opts = try parseArgs(&[_][]const u8{ "context", "daily" });
+    try std.testing.expectEqual(types.Command.context, opts.command);
+    try std.testing.expectEqualStrings("daily", opts.transcript_path.?);
+}
+
+test "parseArgs: weekly then daily resolves as the later command" {
+    const opts = try parseArgs(&[_][]const u8{ "weekly", "daily" });
+    try std.testing.expectEqual(types.Command.daily, opts.command);
 }
 
 test {
