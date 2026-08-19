@@ -109,6 +109,7 @@ pub const Command = enum {
     session,
     blocks,
     statusline,
+    context,
 };
 
 pub const SortOrder = enum { asc, desc };
@@ -134,6 +135,8 @@ pub const CliOptions = struct {
     token_limit: ?u64,
     burn_rate_visual: BurnRateVisual,
     column_level: ColumnLevel,
+    // context-specific
+    transcript_path: ?[]const u8,
 
     pub const default = CliOptions{
         .command = .daily,
@@ -151,6 +154,7 @@ pub const CliOptions = struct {
         .token_limit = null,
         .burn_rate_visual = .off,
         .column_level = .full,
+        .transcript_path = null,
     };
 };
 
@@ -204,6 +208,7 @@ test "CliOptions default has expected values" {
     try std.testing.expectEqual(@as(?u64, null), opts.token_limit);
     try std.testing.expectEqual(BurnRateVisual.off, opts.burn_rate_visual);
     try std.testing.expectEqual(ColumnLevel.full, opts.column_level);
+    try std.testing.expectEqual(@as(?[]const u8, null), opts.transcript_path);
 }
 
 test "Totals struct fields are accessible" {

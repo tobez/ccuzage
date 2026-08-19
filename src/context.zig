@@ -75,6 +75,49 @@ pub fn findTranscript(
     return null;
 }
 
+/// Resolves the session's transcript, reads its last context usage, and prints
+/// the context-window percentage as `NN\n` to stdout.
+///
+/// `transcript_path`, when given, is used as-is. Otherwise the transcript is
+/// located via `CLAUDE_CODE_SESSION_ID` and `findTranscript`.
+///
+/// Errors: `error.NoSessionId` when no path is given and the environment has
+/// no session id; `error.TranscriptNotFound` when discovery finds nothing, or
+/// the resolved transcript cannot be read; `error.NoUsage` when the transcript
+/// has no qualifying usage line.
+pub fn runContext(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    transcript_path: ?[]const u8,
+) !void {
+    var owned_path: ?[]const u8 = null;
+    defer if (owned_path) |p| allocator.free(p);
+
+    const path: []const u8 = if (transcript_path) |p| p else blk: {
+        const session_id = env.get("CLAUDE_CODE_SESSION_ID") orelse return error.NoSessionId;
+        const found = findTranscript(io, allocator, env, session_id) catch return error.TranscriptNotFound;
+        const resolved = found orelse return error.TranscriptNotFound;
+        owned_path = resolved;
+        break :blk resolved;
+    };
+
+    const result = lastContextTokens(io, allocator, path) catch |err| switch (err) {
+        error.NoUsage => return error.NoUsage,
+        else => return error.TranscriptNotFound,
+    };
+    defer allocator.free(result.model);
+
+    const window = contextWindowFor(result.model);
+    const percent = contextPercent(result.tokens, window);
+
+    var stdout_buffer: [64]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    try stdout.print("{d}\n", .{percent});
+    try stdout.flush();
+}
+
 const default_chunk_size: usize = 256 * 1024;
 
 /// Tokens and model of the last qualifying assistant turn in a transcript.

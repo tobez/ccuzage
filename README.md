@@ -54,6 +54,7 @@ ccuzage monthly                 # monthly aggregation
 ccuzage session                 # per-session usage
 ccuzage blocks --recent         # billing blocks, last 3 days
 ccuzage statusline              # one-line summary for status bars
+ccuzage context                 # current session's context-window usage (percent)
 ```
 
 Run `ccuzage --help` for all options.
